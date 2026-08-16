@@ -290,7 +290,6 @@ export function initPixelDissolveEngine() {
   // without a shared rig — see the multi-part detection this replaced) render and animate
   // correctly instead of collapsing to one rigid transform applied to everything.
   let modelParts = [];
-  let modelNormalizeMatrix = IDENTITY4; // shared recenter+scale, applied once outside every part's own transform
   let modelAnimDuration = 1; // shared playback timeline every part's animation wraps against
   let hasAnimation = false;
 
@@ -308,7 +307,6 @@ export function initPixelDissolveEngine() {
   // re-uploading geometry. `normalizeMatrix` recenters+scales the whole assembly as one unit.
   function loadModelParts(parts, normalizeMatrix) {
     disposeModelParts();
-    modelNormalizeMatrix = normalizeMatrix;
     let duration = 1;
     let anyAnim = false;
     for (const part of parts) {
@@ -322,7 +320,9 @@ export function initPixelDissolveEngine() {
       modelParts.push({
         posBuf, normalBuf,
         vertCount: part.localTriPos.length / 3,
-        parentMatrix: part.parentMatrix,
+        // normalizeMatrix * parentMatrix never changes frame to frame (only a part's own local-
+        // or-animated transform does), so it's precomputed once here instead of every render.
+        normalizedParent: m4Multiply(normalizeMatrix, part.parentMatrix),
         localMatrix: part.localMatrix,
         anim: part.anim || null,
       });
@@ -338,7 +338,7 @@ export function initPixelDissolveEngine() {
     for (let pi = 0; pi < modelParts.length; pi++) {
       const part = modelParts[pi];
       const local = parts[pi].localTriPos;
-      const world = m4Multiply(modelNormalizeMatrix, m4Multiply(part.parentMatrix, part.localMatrix));
+      const world = m4Multiply(part.normalizedParent, part.localMatrix);
       for (let i = 0; i < local.length; i += 3) {
         const p = m4TransformPoint(world, [local[i], local[i+1], local[i+2]]);
         const d = p[0]*p[0] + p[1]*p[1] + p[2]*p[2];
@@ -830,9 +830,7 @@ export function initPixelDissolveEngine() {
   // lightIntensity / lightContrast are sliders, driven from React state — see the returned
   // controller at the bottom of this function.
 
-  function renderWebGLFrame(mode) {
-    // mode: 'nogrid-lit' (mask + shading, sampled for the silhouette and per-cell luminance) |
-    // 'display' (what the user actually sees) — both render to the visible canvas.
+  function renderWebGLFrame() {
     gl.viewport(0, 0, glCanvasVis.width, glCanvasVis.height);
     gl.clearColor(0.024, 0.024, 0.031, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -858,7 +856,7 @@ export function initPixelDissolveEngine() {
     // localOrAnim matrix, so nothing needs to special-case "does this model have animation".
     for (const part of modelParts) {
       const localOrAnim = part.anim ? sampleAnimMatrix(part.anim, t) : part.localMatrix;
-      let model = m4Multiply(modelNormalizeMatrix, m4Multiply(part.parentMatrix, localOrAnim));
+      let model = m4Multiply(part.normalizedParent, localOrAnim);
       if (modelIsGLB) model = m4Multiply(GLB_AXIS_FIX, model);
       const mvp = m4Multiply(proj, m4Multiply(view, model));
 
@@ -998,6 +996,13 @@ export function initPixelDissolveEngine() {
   let glitchActive = false, glitchUntil = 0, lastGlitchCheckMs = 0;
   let glitchManualHold = false; // true once "Reseed glitch" fires while the scene is motionless
   let glitchBands = [];
+  // The ASCII-shaped snapshot + tinted copies (see drawColorDispersionGlitch) used to be rebuilt
+  // on every single frame a burst was active — a full extra pass over the whole grid (fillText
+  // is one of Canvas2D's slower operations) plus 3 full-canvas composites, every frame, for the
+  // whole ~130ms+ burst. A burst is short and the corrupted look doesn't need to change frame to
+  // frame within it, so that content is now only regenerated when a new burst actually starts;
+  // this flag tracks that.
+  let glitchContentDirty = true;
   const glitchAsciiSnap = document.createElement('canvas');
   const glitchTints = [document.createElement('canvas'), document.createElement('canvas'), document.createElement('canvas')];
   const glitchBandLayer = document.createElement('canvas');
@@ -1038,6 +1043,7 @@ export function initPixelDissolveEngine() {
       glitchActive = true;
       glitchUntil = nowMs + glitchDuration * (0.7 + Math.random()*0.6);
       glitchBands = generateGlitchBands();
+      glitchContentDirty = true;
     }
   }
   // Splits the frame into three colored, ASCII-shaped copies, each nudged by a single offset,
@@ -1052,22 +1058,28 @@ export function initPixelDissolveEngine() {
     // only ever shown inside the glitch bands, so the shape-break reads as "this strip
     // corrupted", not a global shape change. Sized independently of the normal dot scale via
     // glitchAsciiSize, so the glyphs can be tuned smaller without affecting the base render.
-    glitchAsciiSnap.width = w; glitchAsciiSnap.height = h;
-    const actx = glitchAsciiSnap.getContext('2d')!;
-    drawCells(actx, w, h, 'ascii', glitchAsciiSize);
+    // Regenerated only when a new burst starts (or the target size changed, e.g. switching into
+    // a still/frame export) — see glitchContentDirty — not on every frame of an active burst.
+    const sizeChanged = glitchAsciiSnap.width !== w || glitchAsciiSnap.height !== h;
+    if (glitchContentDirty || sizeChanged) {
+      glitchAsciiSnap.width = w; glitchAsciiSnap.height = h;
+      const actx = glitchAsciiSnap.getContext('2d')!;
+      drawCells(actx, w, h, 'ascii', glitchAsciiSize);
 
-    for (let ci = 0; ci < 3; ci++) {
-      const t = glitchTints[ci];
-      t.width = w; t.height = h;
-      const tctx = t.getContext('2d')!;
-      tctx.drawImage(glitchAsciiSnap, 0, 0);
-      // 'source-atop' recolors only the pixels the ascii shapes actually cover, keeping their
-      // alpha — 'multiply' looked identical live (the canvas is opaque everywhere there) but
-      // was secretly making the whole tint layer fully opaque, which is what turned into black
-      // bars once the destination (the PNG export) actually had transparency to lose.
-      tctx.globalCompositeOperation = 'source-atop';
-      tctx.fillStyle = glitchColors[ci];
-      tctx.fillRect(0, 0, w, h);
+      for (let ci = 0; ci < 3; ci++) {
+        const t = glitchTints[ci];
+        t.width = w; t.height = h;
+        const tctx = t.getContext('2d')!;
+        tctx.drawImage(glitchAsciiSnap, 0, 0);
+        // 'source-atop' recolors only the pixels the ascii shapes actually cover, keeping their
+        // alpha — 'multiply' looked identical live (the canvas is opaque everywhere there) but
+        // was secretly making the whole tint layer fully opaque, which is what turned into black
+        // bars once the destination (the PNG export) actually had transparency to lose.
+        tctx.globalCompositeOperation = 'source-atop';
+        tctx.fillStyle = glitchColors[ci];
+        tctx.fillRect(0, 0, w, h);
+      }
+      glitchContentDirty = false;
     }
 
     glitchBandLayer.width = w; glitchBandLayer.height = h;
@@ -1105,13 +1117,17 @@ export function initPixelDissolveEngine() {
   // (sliders) are driven from React state — see the returned controller at the bottom of
   // this function. Colors stay native <input type="color">, wired below as before.
   ['glitchColor0', 'glitchColor1', 'glitchColor2'].forEach((id, idx) => {
-    document.getElementById(id)!.addEventListener('input', (e) => { glitchColors[idx] = (e.target as HTMLInputElement).value; });
+    document.getElementById(id)!.addEventListener('input', (e) => {
+      glitchColors[idx] = (e.target as HTMLInputElement).value;
+      glitchContentDirty = true; // reflect the new color immediately rather than next burst
+    });
   });
   document.getElementById('glitchReseedBtn')!.addEventListener('click', () => {
     glitchEnabled = true;
     (document.getElementById('glitchEnabled') as HTMLInputElement).checked = true;
     glitchBands = generateGlitchBands();
     glitchActive = true;
+    glitchContentDirty = true;
     glitchManualHold = true; // holds this look until the model starts actually animating again
   });
   const asciiGlyphs = ['+', '-', 'x'];
@@ -1297,11 +1313,15 @@ export function initPixelDissolveEngine() {
     if (sourceMode === '3d' && glOk) {
       if (autoRotate && !dragging) userRotY += dt * autoRotSpeed;
       if (animPlaying) animTime += dt;
-      renderWebGLFrame('nogrid-lit'); // mask + per-cell luminance
+      // One render covers both purposes — what's shown and what gets sampled for the halftone
+      // grid are pixel-identical, so a second full re-render here was pure waste. That waste
+      // used to be one extra draw call; now that a multi-part model issues one draw call per
+      // part, doubling it doubled real per-frame cost, which is what made animation playback
+      // noticeably laggy.
+      renderWebGLFrame();
       const sampled = sampleLitGrid(glCanvasVis, cols(), rows());
       externalMask = sampled.mask;
       externalLumGrid = sampled.lum;
-      renderWebGLFrame('display'); // what the user actually sees
     } else {
       externalLumGrid = null;
     }
@@ -1351,8 +1371,9 @@ export function initPixelDissolveEngine() {
     drawCells(octx, exportW, exportH); // no background fill: stays transparent
     // Bake a fresh glitch burst into this still capture when the effect is turned on — a static
     // OBJ upload has no animation to glitch live over time, so this is how the effect reaches a
-    // still-image export.
-    if (glitchEnabled) drawColorDispersionGlitch(octx, exportW, exportH, generateGlitchBands());
+    // still-image export. Force-regenerate its content rather than reusing whatever's cached
+    // from live preview, which could be stale or a different size.
+    if (glitchEnabled) { glitchContentDirty = true; drawColorDispersionGlitch(octx, exportW, exportH, generateGlitchBands()); }
     off.toBlob((blob) => {
       if (!blob) return;
       downloadBlob(blob, `pixel-dissolve-${exportW}x${exportH}.png`);
@@ -1410,7 +1431,7 @@ export function initPixelDissolveEngine() {
         if (autoRotate) userRotY += dt * autoRotSpeed;
         if (animPlaying && hasAnimation) animTime += dt;
 
-        renderWebGLFrame('nogrid-lit');
+        renderWebGLFrame();
         const sampled = sampleLitGrid(glCanvasVis, cols(), rows());
         externalMask = sampled.mask;
         externalLumGrid = sampled.lum;
@@ -1486,7 +1507,7 @@ export function initPixelDissolveEngine() {
     setGlitchFrequency(v: number) { glitchFrequency = v; },
     setGlitchIntensity(v: number) { glitchIntensity = v; },
     setGlitchDuration(v: number) { glitchDuration = v; },
-    setGlitchAsciiSize(v: number) { glitchAsciiSize = v; },
+    setGlitchAsciiSize(v: number) { glitchAsciiSize = v; glitchContentDirty = true; },
   };
 }
 
