@@ -304,7 +304,10 @@ export function initPixelDissolveEngine() {
     const normals = computeFlatNormals(flat);
     gl.bindBuffer(gl.ARRAY_BUFFER, glNormalBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, normals, gl.STATIC_DRAW);
-    modelFitRadius = boundingSphereRadius(flat);
+    // Clamped to the range a properly-normalized mesh (max axis extent 1.8) can legitimately
+    // produce, so a degenerate/outlier vertex in a malformed upload can't send the camera
+    // absurdly far away (or absurdly close) — the manual scroll-zoom range covers the rest.
+    modelFitRadius = Math.max(0.3, Math.min(3.5, boundingSphereRadius(flat)));
   }
   function parseOBJ(text) {
     const verts = [], tris = [];
@@ -731,7 +734,7 @@ export function initPixelDissolveEngine() {
 
   glCanvasVis.addEventListener('wheel', (e) => {
     e.preventDefault();
-    userScale = Math.max(0.35, Math.min(3, userScale * (1 - e.deltaY * 0.001)));
+    userScale = Math.max(0.15, Math.min(8, userScale * (1 - e.deltaY * 0.001)));
   }, { passive: false });
   glCanvasVis.addEventListener('contextmenu', (e) => e.preventDefault());
 
