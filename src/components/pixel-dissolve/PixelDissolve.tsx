@@ -117,7 +117,7 @@ export default function PixelDissolve() {
   const [glitchFreq, setGlitchFreq] = useState(0.5);
   const [glitchIntensity, setGlitchIntensity] = useState(10);
   const [glitchDuration, setGlitchDuration] = useState(130);
-  const [glitchAsciiSize, setGlitchAsciiSize] = useState(0.45);
+  const [glitchArtifactSize, setGlitchArtifactSize] = useState(0.7);
   const [glitchOrganic, setGlitchOrganic] = useState(0.5);
   const [dustAmt, setDustAmt] = useState(0.3);
   const [asciiAmt, setAsciiAmt] = useState(0.25);
@@ -409,13 +409,13 @@ export default function PixelDissolve() {
               onChange={(v) => { setGlitchDuration(v); engineRef.current?.setGlitchDuration(v); }}
             />
             <FieldSlider
-              label="ASCII symbol size"
-              value={glitchAsciiSize}
-              display={glitchAsciiSize.toFixed(2)}
+              label="Artifact size"
+              value={glitchArtifactSize}
+              display={glitchArtifactSize.toFixed(2)}
               min={0.1}
-              max={1.6}
+              max={4}
               step={0.05}
-              onChange={(v) => { setGlitchAsciiSize(v); engineRef.current?.setGlitchAsciiSize(v); }}
+              onChange={(v) => { setGlitchArtifactSize(v); engineRef.current?.setGlitchArtifactSize(v); }}
             />
             <FieldSlider
               label="Organic shape"

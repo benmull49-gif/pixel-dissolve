@@ -981,7 +981,7 @@ export function initPixelDissolveEngine() {
   let glitchIntensity = 10;  // max horizontal streak offset, px
   let glitchDuration = 130;  // burst length, ms
   let glitchColors = ['#ff2050', '#20ff90', '#3090ff'];
-  let glitchAsciiSize = 0.45; // ASCII glyph size used inside the glitch, independent of dotScale
+  let glitchArtifactSize = 0.7; // size of every shape drawn inside the glitch (ascii or mixed-in base shape), independent of dotScale
   const GLITCH_CH_SCALE = [1, 0.65, 0.85]; // relative offset per channel, for the color fringing
   const GLITCH_FEATHER = 0.35; // base edge softness, as a fraction of each band's height
   let glitchOrganic = 0.5; // 0 = clean straight-edged band, 1 = thick, wavy, blob-like edges
@@ -1053,14 +1053,14 @@ export function initPixelDissolveEngine() {
     // an ASCII-shaped render of this same frame, kept transparent outside the actual shapes —
     // only ever shown inside the glitch bands, so the shape-break reads as "this strip
     // corrupted", not a global shape change. Sized independently of the normal dot scale via
-    // glitchAsciiSize, so the glyphs can be tuned smaller without affecting the base render.
+    // glitchArtifactSize, so the glyphs can be tuned smaller without affecting the base render.
     // Regenerated only when a new burst starts (or the target size changed, e.g. switching into
     // a still/frame export) — see glitchContentDirty — not on every frame of an active burst.
     const sizeChanged = glitchAsciiSnap.width !== w || glitchAsciiSnap.height !== h;
     if (glitchContentDirty || sizeChanged) {
       glitchAsciiSnap.width = w; glitchAsciiSnap.height = h;
       const actx = glitchAsciiSnap.getContext('2d')!;
-      drawCells(actx, w, h, 'ascii', glitchAsciiSize);
+      drawCells(actx, w, h, 'ascii', glitchArtifactSize);
 
       for (let ci = 0; ci < 3; ci++) {
         const t = glitchTints[ci];
@@ -1142,7 +1142,7 @@ export function initPixelDissolveEngine() {
     band._layerW = w;
     band._layerH = bh;
   }
-  // glitchEnabled (switch) and glitchFreq/glitchIntensity/glitchDuration/glitchAsciiSize
+  // glitchEnabled (switch) and glitchFreq/glitchIntensity/glitchDuration/glitchArtifactSize
   // (sliders) are driven from React state — see the returned controller at the bottom of
   // this function. Colors stay native <input type="color">, wired below as before.
   ['glitchColor0', 'glitchColor1', 'glitchColor2'].forEach((id, idx) => {
@@ -1262,24 +1262,30 @@ export function initPixelDissolveEngine() {
     const footW = targetW/c;
     const effDotScale = dotScaleOverride != null ? dotScaleOverride : dotScale;
     // When a shape override is active (currently only the glitch effect's corrupted snapshot —
-    // see drawColorDispersionGlitch), mix in some cells at the model's own normal base shape and
-    // scale instead of forcing every cell to the override — reads as "part of the corruption
-    // still looks like the real thing" rather than a uniform wall of ASCII text. A per-cell hash
+    // see drawColorDispersionGlitch), mix in some cells at the model's own normal base shape
+    // instead of forcing every cell to the override — reads as "part of the corruption still
+    // looks like the real thing" rather than a uniform wall of ASCII text. Both the override and
+    // the mixed-in base shape share the same (glitch-controlled) scale, so "artifact size" reads
+    // as one consistent control regardless of which shape a given cell landed on. A per-cell hash
     // keeps the mix stable for as long as this snapshot is cached, instead of re-rolling (and
     // visibly changing) every time it's redrawn.
     const mixShapes = !!shapeOverride && shapeOverride !== dotShape;
+    // Shared by both the main pass below and the glow pass, so a cell's shape choice is
+    // identical in both — a mismatch here previously threw a ReferenceError in the glow pass.
+    function cellShape(cell) {
+      const useBaseShape = mixShapes && hashNoise(cell.i, cell.j, 93) < 0.5;
+      return useBaseShape ? dotShape : (shapeOverride || dotShape);
+    }
     let rendered = 0;
 
     for (const cell of cells) {
       const px = cell.i*footW, py = cell.j*footW + targetH*0.02;
       const cx = px + footW/2, cy = py + footW/2;
-      const useBaseShape = mixShapes && hashNoise(cell.i, cell.j, 93) < 0.5;
-      const shape = useBaseShape ? dotShape : (shapeOverride || dotShape);
-      const scale = useBaseShape ? dotScale : effDotScale;
+      const shape = cellShape(cell);
 
       if (cell.kind === 'dot') {
         targetCtx.fillStyle = cell.accentColor || bodyColor;
-        drawShape(targetCtx, shape, cx, cy, footW*scale*cell.sizeT, cell.i, cell.j);
+        drawShape(targetCtx, shape, cx, cy, footW*effDotScale*cell.sizeT, cell.i, cell.j);
       } else if (cell.kind === 'ascii') {
         targetCtx.fillStyle = asciiColorMode === 'fixed' ? asciiColor : (cell.accentColor || bodyColor);
         targetCtx.font = 'bold ' + Math.round(footW*0.95*asciiSize) + 'px ui-monospace, Consolas, monospace';
@@ -1296,8 +1302,12 @@ export function initPixelDissolveEngine() {
 
     // Glow: a soft blurred halo behind the brightest dots, layered on top of the crisp base
     // pass above rather than applied to everything — real bloom concentrates at highlights,
-    // and shadowBlur is too costly in Canvas2D to run on every one of thousands of dots.
-    if (glowAmt > 0.02) {
+    // and shadowBlur is too costly in Canvas2D to run on every one of thousands of dots. Glitch
+    // content gets a guaranteed minimum glow of its own regardless of the body's own Glow amount
+    // slider, since a corrupted burst reads as more of an "artifact" with some glow on it even
+    // if the base render is currently glow-free.
+    const effGlowAmt = mixShapes ? Math.max(glowAmt, 0.5) : glowAmt;
+    if (effGlowAmt > 0.02) {
       const glowThreshold = 0.35;
       for (const cell of cells) {
         if (cell.kind !== 'dot' || cell.sizeT < glowThreshold) continue;
@@ -1306,9 +1316,9 @@ export function initPixelDissolveEngine() {
         const cx = px + footW/2, cy = py + footW/2;
         const color = cell.accentColor || bodyColor;
         targetCtx.shadowColor = color;
-        targetCtx.shadowBlur = footW * glowSize * (0.6 + 2.2*glowT) * glowAmt;
+        targetCtx.shadowBlur = footW * glowSize * (0.6 + 2.2*glowT) * effGlowAmt;
         targetCtx.fillStyle = color;
-        drawShape(targetCtx, shape, cx, cy, footW*effDotScale*cell.sizeT, cell.i, cell.j);
+        drawShape(targetCtx, cellShape(cell), cx, cy, footW*effDotScale*cell.sizeT, cell.i, cell.j);
       }
       targetCtx.shadowBlur = 0;
     }
@@ -1540,7 +1550,7 @@ export function initPixelDissolveEngine() {
     setGlitchFrequency(v: number) { glitchFrequency = v; },
     setGlitchIntensity(v: number) { glitchIntensity = v; },
     setGlitchDuration(v: number) { glitchDuration = v; },
-    setGlitchAsciiSize(v: number) { glitchAsciiSize = v; glitchContentDirty = true; },
+    setGlitchArtifactSize(v: number) { glitchArtifactSize = v; glitchContentDirty = true; },
     setGlitchOrganic(v: number) { glitchOrganic = v; },
   };
 }
