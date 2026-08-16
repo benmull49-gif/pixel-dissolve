@@ -888,9 +888,15 @@ export function initPixelDissolveEngine() {
     img.src = URL.createObjectURL(file);
   });
 
+  // Reused for both sampling functions below instead of creating a fresh canvas (and 2D
+  // context) on every call — sampleLitGrid runs once per rendered frame while a 3D model is
+  // shown, and allocating a new canvas backing store 60 times a second outpaces how fast some
+  // browsers reclaim them, which is what made the tab gradually slow down the longer it ran.
+  const sampleScratch = document.createElement('canvas');
+
   function sampleImageToMask(src, c, r, mode) {
-    const off = document.createElement('canvas'); off.width=c; off.height=r;
-    const octx = off.getContext('2d')!;
+    sampleScratch.width = c; sampleScratch.height = r;
+    const octx = sampleScratch.getContext('2d')!;
     octx.clearRect(0,0,c,r);
     const iw = src.videoWidth || src.naturalWidth || src.width;
     const ih = src.videoHeight || src.naturalHeight || src.height;
@@ -915,8 +921,8 @@ export function initPixelDissolveEngine() {
   }
 
   function sampleLitGrid(src, c, r) {
-    const off = document.createElement('canvas'); off.width=c; off.height=r;
-    const octx = off.getContext('2d')!;
+    sampleScratch.width = c; sampleScratch.height = r;
+    const octx = sampleScratch.getContext('2d')!;
     octx.clearRect(0,0,c,r);
     const iw = src.videoWidth || src.naturalWidth || src.width;
     const ih = src.videoHeight || src.naturalHeight || src.height;
@@ -1395,6 +1401,13 @@ export function initPixelDissolveEngine() {
       let virtualMs = 0;
       const startMs = performance.now();
 
+      // One reused canvas for the whole export instead of allocating a fresh one per frame —
+      // exportW/exportH are fixed for the run, and toBlob() below just snapshots whatever's
+      // currently drawn, so there's no need for a distinct canvas object each iteration.
+      const off = document.createElement('canvas');
+      off.width = exportW; off.height = exportH;
+      const octx = off.getContext('2d')!;
+
       for (let f = 0; f < totalFrames; f++) {
         if (frameSeqCancelRequested) throw new Error('Cancelled.');
 
@@ -1413,9 +1426,7 @@ export function initPixelDissolveEngine() {
         externalLumGrid = sampled.lum;
         buildGrid();
 
-        const off = document.createElement('canvas');
-        off.width = exportW; off.height = exportH;
-        const octx = off.getContext('2d')!;
+        octx.clearRect(0, 0, exportW, exportH); // previous frame's content, since the canvas is reused
         drawCells(octx, exportW, exportH); // no background fill: stays transparent
 
         if (glitchEnabled) {
