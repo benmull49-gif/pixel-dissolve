@@ -297,7 +297,6 @@ export function initPixelDissolveEngine() {
   let usingCustomModel = false;
   let modelIsGLB = false; // true only for GLB uploads — OBJ has no defined up-axis convention
   let modelFitRadius = 1; // bounding-sphere radius of whatever's currently loaded; drives camera fit
-  let loggedFitForThisModel = false; // one-time diagnostic console.log per upload — see computeSceneMatrices
   function uploadMeshToGL(flat) {
     gl.bindBuffer(gl.ARRAY_BUFFER, glBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, flat, gl.STATIC_DRAW);
@@ -308,10 +307,7 @@ export function initPixelDissolveEngine() {
     // Clamped to the range a properly-normalized mesh (max axis extent 1.8) can legitimately
     // produce, so a degenerate/outlier vertex in a malformed upload can't send the camera
     // absurdly far away (or absurdly close) — the manual scroll-zoom range covers the rest.
-    const rawFitRadius = boundingSphereRadius(flat);
-    modelFitRadius = Math.max(0.3, Math.min(3.5, rawFitRadius));
-    loggedFitForThisModel = false;
-    console.log('[pixel-dissolve mesh upload]', { vertCount: flat.length / 3, rawFitRadius, clampedFitRadius: modelFitRadius });
+    modelFitRadius = Math.max(0.3, Math.min(3.5, boundingSphereRadius(flat)));
   }
   function parseOBJ(text) {
     const verts = [], tris = [];
@@ -550,18 +546,30 @@ export function initPixelDissolveEngine() {
     let anim = null;
     if (json.animations && json.animations.length) {
       const a = json.animations[0];
-      const channels: any = {};
-      let duration = 0;
-      for (const ch of a.channels) {
-        const sampler = a.samplers[ch.sampler];
-        const path = ch.target.path;
-        if (path !== 'translation' && path !== 'rotation' && path !== 'scale') continue;
-        const times = readGLBAccessor(json, bin, sampler.input);
-        const values = readGLBAccessor(json, bin, sampler.output);
-        channels[path] = { times, values };
-        duration = Math.max(duration, times[times.length-1] || 0);
+      // This tool only supports a single rigid transform applied to the whole merged mesh —
+      // there's no per-node animation. A file with more than one clip, or a single clip driving
+      // more than one node, means different parts are meant to move independently (common for a
+      // multi-object mechanical animation exported without a shared rig, e.g. several parts each
+      // with their own Blender action) — applying just one part's transform to the entire merged
+      // assembly doesn't approximate that, it visibly displaces/distorts the whole thing. Safer
+      // to fall back to the static pose and say so than to silently render something wrong.
+      const distinctTargetNodes = new Set(a.channels.map((ch: any) => ch.target.node));
+      if (json.animations.length > 1 || distinctTargetNodes.size > 1) {
+        warnings.push("This model has multiple independently-animated parts, which isn't supported — only a single rigid-body animation is. Showing the static pose instead.");
+      } else {
+        const channels: any = {};
+        let duration = 0;
+        for (const ch of a.channels) {
+          const sampler = a.samplers[ch.sampler];
+          const path = ch.target.path;
+          if (path !== 'translation' && path !== 'rotation' && path !== 'scale') continue;
+          const times = readGLBAccessor(json, bin, sampler.input);
+          const values = readGLBAccessor(json, bin, sampler.output);
+          channels[path] = { times, values };
+          duration = Math.max(duration, times[times.length-1] || 0);
+        }
+        if (Object.keys(channels).length) anim = { channels, duration: duration || 1, scale: normScale };
       }
-      if (Object.keys(channels).length) anim = { channels, duration: duration || 1, scale: normScale };
     }
     return { flat, anim, warnings };
   }
@@ -633,10 +641,6 @@ export function initPixelDissolveEngine() {
       ? (modelFitRadius / Math.sin(CAMERA_FOV / 2)) * FIT_PADDING
       : 4.5;
     const radius = baseRadius / Math.max(0.15, userScale);
-    if (usingCustomModel && !loggedFitForThisModel) {
-      loggedFitForThisModel = true;
-      console.log('[pixel-dissolve camera fit]', { modelFitRadius, baseRadius, userScale, radius, glVertCount });
-    }
     const az = userRotY, el = Math.max(-1.45, Math.min(1.45, userRotX));
     const eye = [
       target[0] + radius*Math.cos(el)*Math.sin(az),
