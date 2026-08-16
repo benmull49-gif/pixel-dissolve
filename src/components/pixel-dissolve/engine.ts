@@ -347,18 +347,6 @@ export function initPixelDissolveEngine() {
     };
     reader.readAsText(file);
   });
-  document.getElementById('resetModelBtn')!.addEventListener('click', () => {
-    if (!glOk || !flowerVertsCache) return;
-    uploadMeshToGL(flowerVertsCache);
-    usingCustomModel = false;
-    modelIsGLB = false;
-    currentAnim = null;
-    document.getElementById('animHint')!.style.display = 'none';
-    setGlbWarning(null);
-    userRotY = 0.626; userRotX = 0.167; userPanX = 0; userPanY = 0; userScale = 1;
-    setSource('3d');
-  });
-
   // ---- GLB (glTF binary) import: static mesh + simple TRS keyframe animation ----
   let currentAnim = null;   // { channels:{translation,rotation,scale}, duration, scale }
   let animPlaying = false;
@@ -772,15 +760,13 @@ export function initPixelDissolveEngine() {
 
   document.getElementById('src3d')!.addEventListener('click', () => setSource('3d'));
   document.getElementById('srcImage')!.addEventListener('click', () => setSource('image'));
-  document.getElementById('srcVideo')!.addEventListener('click', () => setSource('video'));
 
   function setSource(mode) {
     sourceMode = mode;
-    ['src3d','srcImage','srcVideo'].forEach(id => document.getElementById(id)!.classList.remove('active'));
+    ['src3d','srcImage'].forEach(id => document.getElementById(id)!.classList.remove('active'));
     document.getElementById('src' + (mode==='3d'?'3d':mode.charAt(0).toUpperCase()+mode.slice(1)))!.classList.add('active');
     (document.getElementById('uploadRow') as HTMLElement)!.style.display = mode === '3d' ? 'none' : 'flex';
     (glCanvasVis as HTMLElement).style.opacity = mode === '3d' ? '1' : '0.35';
-    if (mode === 'video') videoEl.play().catch(() => {});
     if (mode === '3d' && !glOk) externalMask = null;
   }
 
@@ -789,12 +775,6 @@ export function initPixelDissolveEngine() {
     const img = new Image();
     img.onload = () => { externalMask = sampleImageToMask(img, cols(), rows(), 'alpha'); setSource('image'); };
     img.src = URL.createObjectURL(file);
-  });
-  const videoEl = document.getElementById('videoEl') as HTMLVideoElement;
-  document.getElementById('mp4Input')!.addEventListener('change', (e) => {
-    const file = (e.target as HTMLInputElement).files[0]; if (!file) return;
-    videoEl.src = URL.createObjectURL(file);
-    videoEl.addEventListener('loadeddata', () => setSource('video'), { once: true });
   });
 
   function sampleImageToMask(src, c, r, mode) {
@@ -1194,9 +1174,6 @@ export function initPixelDissolveEngine() {
       externalMask = sampled.mask;
       externalLumGrid = sampled.lum;
       renderWebGLFrame('display'); // what the user actually sees
-    } else if (sourceMode === 'video') {
-      externalMask = sampleImageToMask(videoEl, cols(), rows(), 'luminance');
-      externalLumGrid = null;
     } else {
       externalLumGrid = null;
     }
@@ -1206,7 +1183,7 @@ export function initPixelDissolveEngine() {
     requestAnimationFrame(masterLoop);
   }
 
-  // ================= downloads: PNG (alpha), video recording, frame-sequence ZIP =================
+  // ================= downloads: PNG (alpha), frame-sequence ZIP =================
   // Plain browser downloads — no capability gating, no per-file size cap, no allowlisted
   // extensions. JSZip builds the frame-sequence archive.
   function downloadBlob(blob, filename) {
@@ -1222,8 +1199,6 @@ export function initPixelDissolveEngine() {
   let exportScale = 3;
   let frameSeqDuration = 4.0, frameSeqFps = 24;
   const downloadPngBtn = document.getElementById('downloadPngBtn')!;
-  const recordBtn = document.getElementById('recordBtn')!;
-  const recordAnimBtn = document.getElementById('recordAnimBtn')!;
   const exportFramesBtn = document.getElementById('exportFramesBtn') as HTMLButtonElement;
   const frameSeqCancelBtn = document.getElementById('frameSeqCancelBtn')!;
   const frameSeqStatus = document.getElementById('frameSeqStatus')!;
@@ -1254,77 +1229,6 @@ export function initPixelDissolveEngine() {
       if (!blob) return;
       downloadBlob(blob, `pixel-dissolve-${exportW}x${exportH}.png`);
     }, 'image/png');
-  });
-
-  let mediaRecorder = null, recordedChunks: any[] = [], autoStopTimer: any = null;
-  function pickVideoMime() {
-    if (typeof MediaRecorder === 'undefined') return null;
-    if (MediaRecorder.isTypeSupported('video/mp4')) return 'video/mp4';
-    if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) return 'video/webm;codecs=vp9';
-    if (MediaRecorder.isTypeSupported('video/webm')) return 'video/webm';
-    return null;
-  }
-  // Shared by both the manual record button and the GLB "one clean loop" button below. Returns
-  // the MediaRecorder on success so the caller can decide how/when to stop it, or null if
-  // recording couldn't start (no downloads permission, already recording, unsupported browser).
-  function startRecording(filenameBase, onStopped?) {
-    if (mediaRecorder && mediaRecorder.state === 'recording') return null;
-    const mime = pickVideoMime();
-    if (!mime) { alert('Video recording is not supported in this browser.'); return null; }
-    const stream = (canvas as any).captureStream(30);
-    recordedChunks = [];
-    mediaRecorder = new MediaRecorder(stream, { mimeType: mime });
-    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) recordedChunks.push(e.data); };
-    mediaRecorder.onstop = () => {
-      const blob = new Blob(recordedChunks, { type: mime });
-      const ext = mime.indexOf('mp4') >= 0 ? 'mp4' : 'webm';
-      if (onStopped) onStopped(ext);
-      downloadBlob(blob, `${filenameBase}.${ext}`);
-    };
-    mediaRecorder.start();
-    return mediaRecorder;
-  }
-
-  recordBtn.addEventListener('click', () => {
-    if (mediaRecorder && mediaRecorder.state === 'recording') {
-      mediaRecorder.stop();
-      return;
-    }
-    const rec = startRecording('pixel-dissolve', () => {
-      recordBtn.textContent = '● Record video';
-      recordBtn.classList.remove('active');
-    });
-    if (rec) {
-      recordBtn.textContent = '■ Stop && save';
-      recordBtn.classList.add('active');
-    }
-  });
-
-  // GLB animations have a known duration, so this captures exactly one clean loop — starting
-  // the animation from time zero and stopping the instant it wraps — instead of the user
-  // having to hand-coordinate Play and Record/Stop themselves.
-  recordAnimBtn.addEventListener('click', () => {
-    if (!currentAnim || currentAnim.duration <= 0) return;
-    if (mediaRecorder && mediaRecorder.state === 'recording') return;
-    animTime = 0;
-    animPlaying = true;
-    const animPlayBtnEl = document.getElementById('animPlayBtn')!;
-    animPlayBtnEl.textContent = '⏸ Pause animation';
-    animPlayBtnEl.classList.add('active');
-    const rec = startRecording('pixel-dissolve-animation', () => {
-      recordAnimBtn.textContent = '⭳ Record animation (MP4)';
-      recordAnimBtn.classList.remove('active');
-    });
-    if (!rec) return;
-    recordAnimBtn.textContent = '● Recording…';
-    recordAnimBtn.classList.add('active');
-    clearTimeout(autoStopTimer);
-    autoStopTimer = setTimeout(() => {
-      if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
-      animPlaying = false;
-      animPlayBtnEl.textContent = '▶ Play animation';
-      animPlayBtnEl.classList.remove('active');
-    }, currentAnim.duration * 1000 + 150); // small pad so the last frame is fully captured
   });
 
   // Renders a deterministic frame sequence and bundles it as alpha PNGs in a single ZIP (via

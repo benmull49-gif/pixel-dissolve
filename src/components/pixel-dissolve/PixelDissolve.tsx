@@ -80,6 +80,18 @@ function ColorSwatch({ id, defaultValue, label }: { id: string; defaultValue: st
   );
 }
 
+// Collapsed by default — explanatory copy takes real vertical space across a dozen-plus
+// control groups, and most of it only matters the first time you're wondering what a
+// control does.
+function HintDetails({ summary, children }: { summary: string; children: React.ReactNode }) {
+  return (
+    <details className="hint">
+      <summary className="cursor-pointer select-none">{summary}</summary>
+      <div className="mt-1.5">{children}</div>
+    </details>
+  );
+}
+
 export default function PixelDissolve() {
   const engineRef = useRef<PixelDissolveEngine | null>(null);
 
@@ -115,7 +127,7 @@ export default function PixelDissolve() {
   const exportPixels = `${700 * exportScale}×${700 * exportScale}`;
 
   return (
-    <div className="flex min-h-screen flex-col bg-background text-foreground">
+    <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
       <header className="flex flex-wrap items-baseline justify-between gap-4 border-b border-border px-6 py-4">
         <div className="flex items-baseline gap-3">
           <h1 className="font-mono text-[15px] font-semibold tracking-wide">PIXEL DISSOLVE</h1>
@@ -128,15 +140,16 @@ export default function PixelDissolve() {
         </div>
       </header>
 
-      <main className="flex min-h-0 flex-1 flex-col gap-4 p-4 lg:flex-row">
-        {/* Left: viewports */}
-        <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 sm:grid-cols-2">
+      <main className="flex min-h-0 flex-1 flex-col gap-4 p-4 lg:flex-row lg:items-start">
+        {/* Left: viewports — pinned to the top instead of stretching/centering across the
+            sidebar's full height, so both canvases are visible without scrolling on load */}
+        <div className="grid w-full flex-shrink-0 grid-cols-1 gap-2 sm:grid-cols-2 lg:flex-1">
           <div className="stage flex min-h-0 flex-col rounded-2xl border border-border">
             <div className="flex items-center justify-between px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
               <span>3D — drag to orbit, right-drag to pan, scroll to scale</span>
               <span id="orbitHint" className="hint-inline" />
             </div>
-            <div className="flex min-h-0 flex-1 items-center justify-center p-3 pt-0">
+            <div className="flex min-h-0 flex-1 items-start justify-center p-3 pt-0">
               <canvas id="glCanvasVis" width={560} height={560} />
             </div>
           </div>
@@ -144,14 +157,14 @@ export default function PixelDissolve() {
             <div className="px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
               2D — live pixel-dissolve output
             </div>
-            <div className="flex min-h-0 flex-1 items-center justify-center p-3 pt-0">
+            <div className="flex min-h-0 flex-1 items-start justify-center p-3 pt-0">
               <canvas id="cv" width={700} height={700} />
             </div>
           </div>
         </div>
 
-        {/* Right: controls */}
-        <aside className="flex w-full shrink-0 flex-col gap-3 overflow-y-auto lg:w-[380px]">
+        {/* Right: controls — independently scrollable, fills the remaining viewport height */}
+        <aside className="flex w-full shrink-0 flex-col gap-3 overflow-y-auto lg:h-full lg:w-[380px] lg:self-stretch">
           <GroupCard title="View">
             <div className="flex flex-wrap gap-2">
               <Button id="autoRotBtn" variant="outline" size="sm">
@@ -194,17 +207,11 @@ export default function PixelDissolve() {
                 Load GLB
               </Button>
               <input type="file" id="glbInput" accept=".glb" className="hidden" />
-              <Button id="resetModelBtn" variant="outline" size="sm">
-                Use flower
-              </Button>
             </div>
             <div className="hint hidden flex-col gap-2" id="animHint">
               <div className="flex flex-wrap gap-2">
                 <Button id="animPlayBtn" variant="outline" size="sm">
                   ▶ Play animation
-                </Button>
-                <Button id="recordAnimBtn" variant="outline" size="sm">
-                  ⭳ Record animation (MP4)
                 </Button>
               </div>
             </div>
@@ -225,14 +232,8 @@ export default function PixelDissolve() {
               <Button id="downloadPngBtn" variant="outline" size="sm">
                 ⭳ PNG (alpha)
               </Button>
-              <Button id="recordBtn" variant="outline" size="sm">
-                ● Record video
-              </Button>
             </div>
-            <div className="hint" id="exportHint" />
-          </GroupCard>
-
-          <GroupCard title="Frame sequence (alpha video)">
+            <Separator />
             <FieldSlider
               label="Duration (s)"
               value={frameSeqDur}
@@ -260,26 +261,23 @@ export default function PixelDissolve() {
               </Button>
             </div>
             <div className="hint hidden" id="frameSeqStatus" />
-            <div className="hint">
-              Browsers can&apos;t produce real alpha-channel video files, so this renders every
+            <HintDetails summary="What do these do?">
+              PNG (alpha) grabs a single high-res transparent still. Export frames renders every
               frame individually (true transparency, no dropped/stuttered frames since it isn&apos;t
               tied to real time) and bundles them as numbered PNGs into one ZIP — import that
-              sequence into your video tool to get the final alpha video. 3D source only; can
-              take a while — higher resolutions and frame counts take proportionally longer, and
-              progress shows above.
-            </div>
+              sequence into your video tool to get an alpha video. Frame export needs the 3D
+              source and can take a while at high resolutions/frame counts; progress shows above.
+            </HintDetails>
+            <div className="hint" id="exportHint" />
           </GroupCard>
 
           <GroupCard title="Source">
             <div className="flex flex-wrap gap-2">
               <Button id="src3d" variant="outline" size="sm" className="active">
-                3D Flower
+                3D
               </Button>
               <Button id="srcImage" variant="outline" size="sm">
                 Image
-              </Button>
-              <Button id="srcVideo" variant="outline" size="sm">
-                Video
               </Button>
             </div>
             <div className="hidden flex-wrap gap-2" id="uploadRow">
@@ -287,10 +285,6 @@ export default function PixelDissolve() {
                 PNG
               </Button>
               <input type="file" id="pngInput" accept="image/png" className="hidden" />
-              <Button variant="outline" size="sm" onClick={() => document.getElementById('mp4Input')?.click()}>
-                MP4
-              </Button>
-              <input type="file" id="mp4Input" accept="video/mp4" className="hidden" />
             </div>
           </GroupCard>
 
@@ -434,10 +428,10 @@ export default function PixelDissolve() {
                 ↻ Reseed glitch
               </Button>
             </div>
-            <div className="hint">
+            <HintDetails summary="About this effect">
               holds still (no auto-flicker) whenever the model isn&apos;t actively animating — use
               reseed to get a new look
-            </div>
+            </HintDetails>
           </GroupCard>
 
           <GroupCard title="Edge style">
@@ -513,8 +507,6 @@ export default function PixelDissolve() {
       </main>
 
       <canvas id="glCanvasSample" width={1} height={1} className="hidden" />
-      {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-      <video id="videoEl" className="hidden" muted loop playsInline />
     </div>
   );
 }
