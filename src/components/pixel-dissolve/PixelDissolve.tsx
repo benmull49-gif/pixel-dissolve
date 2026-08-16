@@ -127,7 +127,11 @@ export default function PixelDissolve() {
   const exportPixels = `${700 * exportScale}×${700 * exportScale}`;
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
+    // Fixed to the viewport height only from `lg` up, where the two-column layout applies and
+    // the sidebar needs its own internal scrollbar. Below that, the page just scrolls normally —
+    // critical so the control cards are never clipped with no way to reach them on a narrower
+    // window/screen, which a plain `overflow-hidden` at every breakpoint used to do.
+    <div className="flex min-h-screen flex-col bg-background text-foreground lg:h-screen lg:overflow-hidden">
       <header className="flex flex-wrap items-baseline justify-between gap-4 border-b border-border px-6 py-4">
         <div className="flex items-baseline gap-3">
           <h1 className="font-mono text-[15px] font-semibold tracking-wide">PIXEL DISSOLVE</h1>
@@ -140,31 +144,29 @@ export default function PixelDissolve() {
         </div>
       </header>
 
-      <main className="flex min-h-0 flex-1 flex-col gap-4 p-4 lg:flex-row lg:items-start">
-        {/* Left: viewports — pinned to the top instead of stretching/centering across the
-            sidebar's full height, so both canvases are visible without scrolling on load */}
-        <div className="grid w-full flex-shrink-0 grid-cols-1 gap-2 sm:grid-cols-2 lg:flex-1">
-          <div className="stage flex min-h-0 flex-col rounded-2xl border border-border">
-            <div className="flex items-center justify-between px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+      <main className="flex min-h-0 flex-1 flex-col gap-4 p-4 lg:flex-row">
+        {/* Left: viewports. Each is a single tile (no header bar above it) with the caption
+            overlaid on the canvas itself, both forced to the same rendered size via
+            object-contain regardless of their differing internal resolutions (560 vs 700),
+            and stretched to fill all the height available below the header. */}
+        <div className="grid min-h-[320px] flex-1 grid-cols-1 gap-2 sm:grid-cols-2 lg:min-h-0">
+          <div className="relative min-h-0 overflow-hidden rounded-2xl border border-border bg-[#060608]">
+            <canvas id="glCanvasVis" width={560} height={560} className="h-full w-full object-contain" />
+            <div className="pointer-events-none absolute inset-x-2 top-2 flex items-center justify-between gap-2 rounded-md bg-black/50 px-2 py-1 font-mono text-[9.5px] uppercase tracking-wider text-white/80 backdrop-blur-sm">
               <span>3D — drag to orbit, right-drag to pan, scroll to scale</span>
-              <span id="orbitHint" className="hint-inline" />
-            </div>
-            <div className="flex min-h-0 flex-1 items-start justify-center p-3 pt-0">
-              <canvas id="glCanvasVis" width={560} height={560} />
+              <span id="orbitHint" className="text-white/70" />
             </div>
           </div>
-          <div className="stage flex min-h-0 flex-col rounded-2xl border border-border">
-            <div className="px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+          <div className="relative min-h-0 overflow-hidden rounded-2xl border border-border bg-[#060608]">
+            <canvas id="cv" width={700} height={700} className="h-full w-full object-contain" />
+            <div className="pointer-events-none absolute inset-x-2 top-2 rounded-md bg-black/50 px-2 py-1 font-mono text-[9.5px] uppercase tracking-wider text-white/80 backdrop-blur-sm">
               2D — live pixel-dissolve output
-            </div>
-            <div className="flex min-h-0 flex-1 items-start justify-center p-3 pt-0">
-              <canvas id="cv" width={700} height={700} />
             </div>
           </div>
         </div>
 
         {/* Right: controls — independently scrollable, fills the remaining viewport height */}
-        <aside className="flex w-full shrink-0 flex-col gap-3 overflow-y-auto lg:h-full lg:w-[380px] lg:self-stretch">
+        <aside className="flex w-full shrink-0 flex-col gap-3 overflow-y-auto lg:h-full lg:w-[380px]">
           <GroupCard title="View">
             <div className="flex flex-wrap gap-2">
               <Button id="autoRotBtn" variant="outline" size="sm">

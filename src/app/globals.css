@@ -132,13 +132,6 @@
 
 /* ---- Pixel Dissolve: engine-owned UI bits the React layer doesn't directly control ---- */
 
-.stage canvas {
-  max-width: 100%;
-  max-height: 100%;
-  background: #060608;
-  border-radius: var(--radius-lg);
-  box-shadow: 0 0 0 1px var(--border);
-}
 #glCanvasVis { cursor: grab; touch-action: none; }
 #glCanvasVis:active { cursor: grabbing; }
 
