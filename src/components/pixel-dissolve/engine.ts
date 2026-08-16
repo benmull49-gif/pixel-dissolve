@@ -297,6 +297,7 @@ export function initPixelDissolveEngine() {
   let usingCustomModel = false;
   let modelIsGLB = false; // true only for GLB uploads — OBJ has no defined up-axis convention
   let modelFitRadius = 1; // bounding-sphere radius of whatever's currently loaded; drives camera fit
+  let loggedFitForThisModel = false; // one-time diagnostic console.log per upload — see computeSceneMatrices
   function uploadMeshToGL(flat) {
     gl.bindBuffer(gl.ARRAY_BUFFER, glBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, flat, gl.STATIC_DRAW);
@@ -307,7 +308,10 @@ export function initPixelDissolveEngine() {
     // Clamped to the range a properly-normalized mesh (max axis extent 1.8) can legitimately
     // produce, so a degenerate/outlier vertex in a malformed upload can't send the camera
     // absurdly far away (or absurdly close) — the manual scroll-zoom range covers the rest.
-    modelFitRadius = Math.max(0.3, Math.min(3.5, boundingSphereRadius(flat)));
+    const rawFitRadius = boundingSphereRadius(flat);
+    modelFitRadius = Math.max(0.3, Math.min(3.5, rawFitRadius));
+    loggedFitForThisModel = false;
+    console.log('[pixel-dissolve mesh upload]', { vertCount: flat.length / 3, rawFitRadius, clampedFitRadius: modelFitRadius });
   }
   function parseOBJ(text) {
     const verts = [], tris = [];
@@ -629,6 +633,10 @@ export function initPixelDissolveEngine() {
       ? (modelFitRadius / Math.sin(CAMERA_FOV / 2)) * FIT_PADDING
       : 4.5;
     const radius = baseRadius / Math.max(0.15, userScale);
+    if (usingCustomModel && !loggedFitForThisModel) {
+      loggedFitForThisModel = true;
+      console.log('[pixel-dissolve camera fit]', { modelFitRadius, baseRadius, userScale, radius, glVertCount });
+    }
     const az = userRotY, el = Math.max(-1.45, Math.min(1.45, userRotX));
     const eye = [
       target[0] + radius*Math.cos(el)*Math.sin(az),
