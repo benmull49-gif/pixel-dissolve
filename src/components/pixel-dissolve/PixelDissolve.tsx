@@ -118,6 +118,7 @@ export default function PixelDissolve() {
   const [glitchIntensity, setGlitchIntensity] = useState(10);
   const [glitchDuration, setGlitchDuration] = useState(130);
   const [glitchAsciiSize, setGlitchAsciiSize] = useState(0.45);
+  const [glitchOrganic, setGlitchOrganic] = useState(0.5);
   const [dustAmt, setDustAmt] = useState(0.3);
   const [asciiAmt, setAsciiAmt] = useState(0.25);
   const [asciiSize, setAsciiSize] = useState(1.0);
@@ -415,6 +416,15 @@ export default function PixelDissolve() {
               max={1.6}
               step={0.05}
               onChange={(v) => { setGlitchAsciiSize(v); engineRef.current?.setGlitchAsciiSize(v); }}
+            />
+            <FieldSlider
+              label="Organic shape"
+              value={glitchOrganic}
+              display={glitchOrganic.toFixed(2)}
+              min={0}
+              max={1}
+              step={0.05}
+              onChange={(v) => { setGlitchOrganic(v); engineRef.current?.setGlitchOrganic(v); }}
             />
             <div className="flex gap-2">
               <ColorSwatch id="glitchColor0" defaultValue="#ff2050" label="1" />

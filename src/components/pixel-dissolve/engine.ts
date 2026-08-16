@@ -983,7 +983,8 @@ export function initPixelDissolveEngine() {
   let glitchColors = ['#ff2050', '#20ff90', '#3090ff'];
   let glitchAsciiSize = 0.45; // ASCII glyph size used inside the glitch, independent of dotScale
   const GLITCH_CH_SCALE = [1, 0.65, 0.85]; // relative offset per channel, for the color fringing
-  const GLITCH_FEATHER = 0.35; // fraction of each band's height spent fading in/out at the edges
+  const GLITCH_FEATHER = 0.35; // base edge softness, as a fraction of each band's height
+  let glitchOrganic = 0.5; // 0 = clean straight-edged band, 1 = thick, wavy, blob-like edges
   let glitchActive = false, glitchUntil = 0, lastGlitchCheckMs = 0;
   let glitchManualHold = false; // true once "Reseed glitch" fires while the scene is motionless
   let glitchBands = [];
@@ -992,19 +993,23 @@ export function initPixelDissolveEngine() {
   // is one of Canvas2D's slower operations) plus 3 full-canvas composites, every frame, for the
   // whole ~130ms+ burst. A burst is short and the corrupted look doesn't need to change frame to
   // frame within it, so that content is now only regenerated when a new burst actually starts;
-  // this flag tracks that.
+  // this flag tracks that. Each band's own fully-composited layer (see ensureBandLayer) is
+  // cached the same way, keyed off the band object itself rather than this flag, since bands
+  // are fresh objects every burst anyway.
   let glitchContentDirty = true;
   const glitchAsciiSnap = document.createElement('canvas');
   const glitchTints = [document.createElement('canvas'), document.createElement('canvas'), document.createElement('canvas')];
-  const glitchBandLayer = document.createElement('canvas');
+  const glitchMaskScratch = document.createElement('canvas'); // reused per band while building its organic mask
   function generateGlitchBands() {
     const numBands = 2 + Math.floor(Math.random()*5);
     const bands = [];
     for (let b = 0; b < numBands; b++) {
+      const baseHeight = 0.02 + Math.random()*0.07; // thicker baseline than the old 0.012-0.062
       bands.push({
-        y0: Math.random(),                          // fraction of canvas height
-        height: 0.012 + Math.random()*0.05,          // fraction of canvas height
+        y0: Math.random(),                                    // fraction of canvas height
+        height: baseHeight * (1 + glitchOrganic * (0.5 + Math.random())), // organic amount thickens further
         mag: glitchIntensity * (0.6 + Math.random()*1.3) * (Math.random() < 0.5 ? -1 : 1),
+        wobbleSeed: Math.random() * 1000, // this band's own organic-edge noise phase
       });
     }
     return bands;
@@ -1073,36 +1078,69 @@ export function initPixelDissolveEngine() {
       glitchContentDirty = false;
     }
 
-    glitchBandLayer.width = w; glitchBandLayer.height = h;
-    const blctx = glitchBandLayer.getContext('2d')!;
-
     for (const band of (bandsOverride || glitchBands)) {
+      ensureBandLayer(band, w, h);
       const y0 = Math.round(band.y0 * h);
-      const bh = Math.max(1, Math.round(band.height * h));
-
-      blctx.clearRect(0, y0, w, bh);
-      blctx.globalCompositeOperation = 'lighter';
-      for (let ci = 0; ci < 3; ci++) {
-        const dx = band.mag * GLITCH_CH_SCALE[ci];
-        blctx.drawImage(glitchTints[ci], 0, y0, w, bh, dx, y0, w, bh);
-      }
-
-      // feather: multiply this band's alpha by a vertical ramp (0 at both edges, 1 through the
-      // middle) so the glitch fades in/out instead of stopping at a hard rectangle edge
-      blctx.globalCompositeOperation = 'destination-in';
-      const grad = blctx.createLinearGradient(0, y0, 0, y0 + bh);
-      grad.addColorStop(0, 'rgba(0,0,0,0)');
-      grad.addColorStop(GLITCH_FEATHER, 'rgba(0,0,0,1)');
-      grad.addColorStop(1 - GLITCH_FEATHER, 'rgba(0,0,0,1)');
-      grad.addColorStop(1, 'rgba(0,0,0,0)');
-      blctx.fillStyle = grad;
-      blctx.fillRect(0, y0, w, bh);
-      blctx.globalCompositeOperation = 'source-over';
-
-      // composite the feathered band onto the frame — where it's transparent (edges, gaps
-      // between shapes), the original already-rendered content shows through untouched
-      targetCtx.drawImage(glitchBandLayer, 0, y0, w, bh, 0, y0, w, bh);
+      // composite the cached, already-feathered band layer onto the frame — where it's
+      // transparent (edges, gaps between shapes), the original already-rendered content shows
+      // through untouched
+      targetCtx.drawImage(band._layer, 0, y0);
     }
+  }
+  // Builds (and caches on the band object itself) one band's fully-composited layer: the three
+  // channel-shifted tinted copies, masked by an organic, blurred, noise-wavy silhouette instead
+  // of a crisp rectangle — a flat gradient feather always read as a clean scanline no matter how
+  // "amorphous" glitchOrganic was set, since only the top/bottom edges varied and only linearly.
+  // This varies per horizontal position too, and picking up the blur along the way is what makes
+  // higher organic amounts look thicker/softer/blob-like rather than just wavier. At organic=0
+  // the wobble amplitude is 0 (a flat edge) but a small base blur still applies, so the effect
+  // never goes back to a perfectly hard-edged rectangle. Only rebuilt the first time a given band
+  // is drawn (a fresh band object each burst) — every later frame in the same burst just reuses it.
+  function ensureBandLayer(band, w, h) {
+    const y0 = Math.round(band.y0 * h);
+    const bh = Math.max(1, Math.round(band.height * h));
+    if (band._layer && band._layerW === w && band._layerH === bh) return;
+
+    const layer = band._layer || document.createElement('canvas');
+    layer.width = w; layer.height = bh;
+    const lctx = layer.getContext('2d')!;
+    lctx.clearRect(0, 0, w, bh);
+    lctx.globalCompositeOperation = 'lighter';
+    for (let ci = 0; ci < 3; ci++) {
+      const dx = band.mag * GLITCH_CH_SCALE[ci];
+      lctx.drawImage(glitchTints[ci], 0, y0, w, bh, dx, 0, w, bh);
+    }
+
+    glitchMaskScratch.width = w; glitchMaskScratch.height = bh;
+    const mctx = glitchMaskScratch.getContext('2d')!;
+    mctx.clearRect(0, 0, w, bh);
+    const segs = 12;
+    const wobbleAmp = bh * 0.9 * glitchOrganic;
+    mctx.beginPath();
+    for (let i = 0; i <= segs; i++) {
+      const x = (i / segs) * w;
+      const topY = wobbleAmp * (hashNoise(i * 0.6, band.wobbleSeed, 3) - 0.5);
+      if (i === 0) mctx.moveTo(x, topY); else mctx.lineTo(x, topY);
+    }
+    for (let i = segs; i >= 0; i--) {
+      const x = (i / segs) * w;
+      const botY = bh - wobbleAmp * (hashNoise(i * 0.6, band.wobbleSeed + 500, 3) - 0.5);
+      mctx.lineTo(x, botY);
+    }
+    mctx.closePath();
+    mctx.fillStyle = '#fff';
+    const blurPx = Math.max(1, bh * GLITCH_FEATHER * (0.6 + glitchOrganic));
+    mctx.filter = `blur(${blurPx}px)`;
+    mctx.fill();
+    mctx.filter = 'none';
+
+    lctx.globalCompositeOperation = 'destination-in';
+    lctx.drawImage(glitchMaskScratch, 0, 0);
+    lctx.globalCompositeOperation = 'source-over';
+
+    band._layer = layer;
+    band._layerW = w;
+    band._layerH = bh;
   }
   // glitchEnabled (switch) and glitchFreq/glitchIntensity/glitchDuration/glitchAsciiSize
   // (sliders) are driven from React state — see the returned controller at the bottom of
@@ -1494,6 +1532,7 @@ export function initPixelDissolveEngine() {
     setGlitchIntensity(v: number) { glitchIntensity = v; },
     setGlitchDuration(v: number) { glitchDuration = v; },
     setGlitchAsciiSize(v: number) { glitchAsciiSize = v; glitchContentDirty = true; },
+    setGlitchOrganic(v: number) { glitchOrganic = v; },
   };
 }
 
