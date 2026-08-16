@@ -20,15 +20,8 @@ export function initPixelDissolveEngine() {
   const ctx = canvas.getContext('2d')!;
   const CW = canvas.width, CH = canvas.height;
 
-  let palette = ['#ffffff', '#ffffff', '#ffffff', '#ffffff'];
   let bodyColor = '#ffffff';
-  let accentAmt = 0.30;
-  ['col0', 'col1', 'col2', 'col3'].forEach((id, idx) => {
-    document.getElementById(id)!.addEventListener('input', (e) => { palette[idx] = (e.target as HTMLInputElement).value; });
-  });
   document.getElementById('bodyCol')!.addEventListener('input', (e) => { bodyColor = (e.target as HTMLInputElement).value; });
-  // accentAmt is a slider, driven from React state — see the returned controller at the
-  // bottom of this function instead of a getElementById listener here.
 
   let asciiColor = '#ffffff';
   let asciiColorMode = 'accent'; // 'accent' = same accent/body system as other cells | 'fixed' = asciiColor
@@ -776,7 +769,6 @@ export function initPixelDissolveEngine() {
 
   // ---- interactive orbit / pan / scale state ----
   let userRotY = 0.626, userRotX = 0.167, userPanX = 0, userPanY = 0, userScale = 1;
-  let autoRotate = false, autoRotSpeed = 0.18;
   let dragging = null, lastPX = 0, lastPY = 0;
   const orbitHint = document.getElementById('orbitHint');
 
@@ -820,13 +812,6 @@ export function initPixelDissolveEngine() {
   }, { passive: false });
   glCanvasVis.addEventListener('contextmenu', (e) => e.preventDefault());
 
-  document.getElementById('autoRotBtn')!.addEventListener('click', (e) => {
-    autoRotate = !autoRotate;
-    (e.target as HTMLElement).classList.toggle('active', autoRotate);
-  });
-  document.getElementById('resetViewBtn')!.addEventListener('click', () => {
-    userRotY = 0.626; userRotX = 0.167; userPanX = 0; userPanY = 0; userScale = 1;
-  });
   // lightIntensity / lightContrast are sliders, driven from React state — see the returned
   // controller at the bottom of this function.
 
@@ -1162,16 +1147,10 @@ export function initPixelDissolveEngine() {
     const bandPxBase = Math.max(1.5, maxR * dissolveSpread);
     const seedOff = (seed % 10000) * 0.01;
 
-    // sparse, shadow-biased, spatially-clustered accent color (or null = use body color).
-    // Bright/lit cells mostly stay body-colored; darker/shadowed cells are more likely to
-    // carry an accent, and same-color accents cluster into patches rather than scattering.
-    function resolveAccent(i, j, idx) {
-      const lum = externalLumGrid ? externalLumGrid[idx] : 0.55;
-      const shadowFactor = Math.max(0, 1 - lum);
-      const roll = hashNoise(i, j, 44);
-      if (roll >= accentAmt * (0.2 + 0.9*shadowFactor)) return null;
-      const clusterHash = hashNoise(Math.floor(i/5) + seedOff, Math.floor(j/5) + seedOff, 88);
-      return palette[Math.min(3, Math.floor(clusterHash*4))];
+    // Edge accent colors were removable-section-only controls (palette swatches + accent
+    // amount) — with no UI left to configure them, every cell just uses the body color.
+    function resolveAccent() {
+      return null;
     }
 
     cells = [];
@@ -1299,7 +1278,6 @@ export function initPixelDissolveEngine() {
   // cellSize/dotScale/dotGamma/dotShape/glowAmt/glowSize/dissolve/edgeRand/dustAmt/asciiAmt/
   // asciiSize are sliders (or the shape select) driven from React state — see the returned
   // controller at the bottom of this function.
-  document.getElementById('reseedBtn')!.addEventListener('click', () => { seed = Math.floor(Math.random()*1e9); });
 
   // ================= master loop =================
   let lastTs = 0;
@@ -1311,7 +1289,6 @@ export function initPixelDissolveEngine() {
     lastTs = ts;
 
     if (sourceMode === '3d' && glOk) {
-      if (autoRotate && !dragging) userRotY += dt * autoRotSpeed;
       if (animPlaying) animTime += dt;
       // One render covers both purposes — what's shown and what gets sampled for the halftone
       // grid are pixel-identical, so a second full re-render here was pure waste. That waste
@@ -1428,7 +1405,6 @@ export function initPixelDissolveEngine() {
         exportFramesBtn.textContent = `Rendering ${f+1}/${totalFrames}…`;
         setFrameSeqStatus(`Rendering frame ${f+1} of ${totalFrames}${etaTxt}`);
 
-        if (autoRotate) userRotY += dt * autoRotSpeed;
         if (animPlaying && hasAnimation) animTime += dt;
 
         renderWebGLFrame();
@@ -1502,7 +1478,6 @@ export function initPixelDissolveEngine() {
     setDustAmt(v: number) { dustAmt = v; },
     setAsciiAmt(v: number) { asciiAmt = v; },
     setAsciiSize(v: number) { asciiSize = v; },
-    setAccentAmt(v: number) { accentAmt = v; },
     setGlitchEnabled(v: boolean) { glitchEnabled = v; },
     setGlitchFrequency(v: number) { glitchFrequency = v; },
     setGlitchIntensity(v: number) { glitchIntensity = v; },

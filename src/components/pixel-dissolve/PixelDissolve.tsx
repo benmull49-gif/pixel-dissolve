@@ -121,7 +121,6 @@ export default function PixelDissolve() {
   const [dustAmt, setDustAmt] = useState(0.3);
   const [asciiAmt, setAsciiAmt] = useState(0.25);
   const [asciiSize, setAsciiSize] = useState(1.0);
-  const [accentAmt, setAccentAmt] = useState(0.3);
 
   useEffect(() => {
     if (engineBooted) return;
@@ -175,17 +174,6 @@ export default function PixelDissolve() {
 
         {/* Right: controls — independently scrollable, fills the remaining viewport height */}
         <aside className="flex w-full shrink-0 flex-col gap-3 overflow-y-auto lg:h-full lg:w-[380px]">
-          <GroupCard title="View">
-            <div className="flex flex-wrap gap-2">
-              <Button id="autoRotBtn" variant="outline" size="sm">
-                Auto-rotate
-              </Button>
-              <Button id="resetViewBtn" variant="outline" size="sm">
-                Reset view
-              </Button>
-            </div>
-          </GroupCard>
-
           <GroupCard title="Lighting">
             <FieldSlider
               label="Light intensity"
@@ -486,30 +474,6 @@ export default function PixelDissolve() {
             <div className="flex gap-2">
               <ColorSwatch id="bodyCol" defaultValue="#ffffff" label="body" />
             </div>
-          </GroupCard>
-
-          <GroupCard title="Edge accent colors">
-            <div className="flex gap-2">
-              <ColorSwatch id="col0" defaultValue="#ffffff" label="1" />
-              <ColorSwatch id="col1" defaultValue="#ffffff" label="2" />
-              <ColorSwatch id="col2" defaultValue="#ffffff" label="3" />
-              <ColorSwatch id="col3" defaultValue="#ffffff" label="4" />
-            </div>
-            <FieldSlider
-              label="Accent amount"
-              value={accentAmt}
-              display={accentAmt.toFixed(2)}
-              min={0}
-              max={1}
-              step={0.01}
-              onChange={(v) => { setAccentAmt(v); engineRef.current?.setAccentAmt(v); }}
-            />
-          </GroupCard>
-
-          <GroupCard title="Seed">
-            <Button id="reseedBtn" variant="outline" size="sm" className="self-start">
-              ↻ Reseed
-            </Button>
           </GroupCard>
 
           <Separator />
