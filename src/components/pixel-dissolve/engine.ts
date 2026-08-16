@@ -205,6 +205,21 @@ export function initPixelDissolveEngine() {
     return [cx/totalArea, cy/totalArea, cz/totalArea];
   }
 
+  // Radius of the smallest sphere centered on the origin that contains every vertex. Called on
+  // an already-recentered mesh (centroid subtracted), so this is exactly the model's true extent
+  // around its own rotation pivot — used to place the camera so the model actually fills the
+  // frame, instead of a fixed camera distance that only looked right for the specific proportions
+  // of the procedural flower it was originally tuned against.
+  function boundingSphereRadius(flat) {
+    let maxSq = 0;
+    for (let i = 0; i < flat.length; i += 3) {
+      const x = flat[i], y = flat[i+1], z = flat[i+2];
+      const d = x*x + y*y + z*z;
+      if (d > maxSq) maxSq = d;
+    }
+    return Math.sqrt(maxSq) || 1;
+  }
+
   function initWebGL() {
     try {
       gl = glCanvasVis.getContext('webgl', { antialias: true, alpha: false, preserveDrawingBuffer: true });
@@ -281,6 +296,7 @@ export function initPixelDissolveEngine() {
   let flowerVertsCache = null;
   let usingCustomModel = false;
   let modelIsGLB = false; // true only for GLB uploads — OBJ has no defined up-axis convention
+  let modelFitRadius = 1; // bounding-sphere radius of whatever's currently loaded; drives camera fit
   function uploadMeshToGL(flat) {
     gl.bindBuffer(gl.ARRAY_BUFFER, glBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, flat, gl.STATIC_DRAW);
@@ -288,6 +304,7 @@ export function initPixelDissolveEngine() {
     const normals = computeFlatNormals(flat);
     gl.bindBuffer(gl.ARRAY_BUFFER, glNormalBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, normals, gl.STATIC_DRAW);
+    modelFitRadius = boundingSphereRadius(flat);
   }
   function parseOBJ(text) {
     const verts = [], tris = [];
@@ -591,11 +608,24 @@ export function initPixelDissolveEngine() {
   // Camera orbits a fixed target instead of the object rotating in place — smoother to
   // navigate, and it means crease-edge projection and the GL render always agree exactly
   // since both call this same function for their matrices.
+  const CAMERA_FOV = 45 * Math.PI / 180;
+  // Margin so an uploaded model doesn't touch the frame edges while orbiting — enough room to
+  // rotate freely without clipping, without leaving it looking small/lost in the viewport.
+  const FIT_PADDING = 1.35;
   function computeSceneMatrices() {
     const baseZ = usingCustomModel ? 0 : 0.85;
-    const proj = m4Perspective(45*Math.PI/180, glCanvasVis.width/glCanvasVis.height, 0.1, 20);
+    const proj = m4Perspective(CAMERA_FOV, glCanvasVis.width/glCanvasVis.height, 0.1, 20);
     const target = [-userPanX*2, -userPanY*2, baseZ];
-    const radius = 4.5 / Math.max(0.15, userScale);
+    // Uploaded models are recentered on their own centroid at load time (see
+    // computeMeshCentroid), so `target` above already sits at that same center for them —
+    // meaning modelFitRadius (measured from that same origin) directly gives the distance
+    // needed to fit the model in frame, regardless of its shape or original scale. The
+    // procedural flower keeps its own hand-tuned distance: it isn't recentered the same way,
+    // so its coordinate origin (the stem base) isn't where the camera is actually aimed.
+    const baseRadius = usingCustomModel
+      ? (modelFitRadius / Math.sin(CAMERA_FOV / 2)) * FIT_PADDING
+      : 4.5;
+    const radius = baseRadius / Math.max(0.15, userScale);
     const az = userRotY, el = Math.max(-1.45, Math.min(1.45, userRotX));
     const eye = [
       target[0] + radius*Math.cos(el)*Math.sin(az),
