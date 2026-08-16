@@ -1260,17 +1260,26 @@ export function initPixelDissolveEngine() {
   function drawCells(targetCtx, targetW, targetH, shapeOverride?, dotScaleOverride?) {
     const c=colsN;
     const footW = targetW/c;
-    const shape = shapeOverride || dotShape;
     const effDotScale = dotScaleOverride != null ? dotScaleOverride : dotScale;
+    // When a shape override is active (currently only the glitch effect's corrupted snapshot —
+    // see drawColorDispersionGlitch), mix in some cells at the model's own normal base shape and
+    // scale instead of forcing every cell to the override — reads as "part of the corruption
+    // still looks like the real thing" rather than a uniform wall of ASCII text. A per-cell hash
+    // keeps the mix stable for as long as this snapshot is cached, instead of re-rolling (and
+    // visibly changing) every time it's redrawn.
+    const mixShapes = !!shapeOverride && shapeOverride !== dotShape;
     let rendered = 0;
 
     for (const cell of cells) {
       const px = cell.i*footW, py = cell.j*footW + targetH*0.02;
       const cx = px + footW/2, cy = py + footW/2;
+      const useBaseShape = mixShapes && hashNoise(cell.i, cell.j, 93) < 0.5;
+      const shape = useBaseShape ? dotShape : (shapeOverride || dotShape);
+      const scale = useBaseShape ? dotScale : effDotScale;
 
       if (cell.kind === 'dot') {
         targetCtx.fillStyle = cell.accentColor || bodyColor;
-        drawShape(targetCtx, shape, cx, cy, footW*effDotScale*cell.sizeT, cell.i, cell.j);
+        drawShape(targetCtx, shape, cx, cy, footW*scale*cell.sizeT, cell.i, cell.j);
       } else if (cell.kind === 'ascii') {
         targetCtx.fillStyle = asciiColorMode === 'fixed' ? asciiColor : (cell.accentColor || bodyColor);
         targetCtx.font = 'bold ' + Math.round(footW*0.95*asciiSize) + 'px ui-monospace, Consolas, monospace';
