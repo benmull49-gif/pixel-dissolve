@@ -1,516 +1,43 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pixel Dissolve</title>
-<style>
-  :root {
-    --bg: #f4f4f2;
-    --panel: #ffffff;
-    --border: #dcdcd8;
-    --text: #17171a;
-    --text-dim: #6b6b70;
-    --accent: #6a52e0;
-    --accent-dim: #a897f0;
-    --warn: #a8650a;
-    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
-    --sans: -apple-system, "Segoe UI", "Inter", Helvetica, Arial, sans-serif;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #0a0a0c;
-      --panel: #131317;
-      --border: #26262c;
-      --text: #f0efec;
-      --text-dim: #87868f;
-      --accent: #8f7cf5;
-      --accent-dim: #4a3f8a;
-      --warn: #e2a53a;
-    }
-  }
-  :root[data-theme="dark"] {
-    --bg: #0a0a0c;
-    --panel: #131317;
-    --border: #26262c;
-    --text: #f0efec;
-    --text-dim: #87868f;
-    --accent: #8f7cf5;
-    --accent-dim: #4a3f8a;
-    --warn: #e2a53a;
-  }
+// @ts-nocheck
+//
+// Ported near-verbatim from the original single-file Pixel Dissolve build (vanilla
+// canvas/WebGL, no framework). This file intentionally stays untyped: it's the
+// already-debugged rendering/parsing/export engine (halftone grid, hand-rolled WebGL
+// matrix math, OBJ/GLB parsing, the color-dispersion glitch effect, PNG/video/frame-
+// sequence export), and re-deriving it as fully-typed React state would risk
+// reintroducing bugs that took many iterations to fix the first time. It operates on
+// the DOM directly by element id, exactly as before — the surrounding React component
+// just renders a matching DOM shape once and then hands control to `initPixelDissolveEngine`.
+//
+// Call once, after the matching markup has mounted. Safe to call only once per page —
+// it wires up global (`window`) event listeners and starts its own requestAnimationFrame
+// loop with no teardown, so the calling component is responsible for guarding against
+// React StrictMode's double-invoke in development (see PixelDissolve.tsx).
+import JSZip from 'jszip';
 
-  * { box-sizing: border-box; }
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--sans);
-    margin: 0;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-  }
-
-  header {
-    padding: 16px 24px 12px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 16px;
-    flex-wrap: wrap;
-  }
-  .title-block { display: flex; align-items: baseline; gap: 12px; }
-  h1 {
-    font-family: var(--mono);
-    font-size: 15px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    margin: 0;
-  }
-  .tag {
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--text-dim);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    padding: 2px 7px;
-  }
-  .status {
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--text-dim);
-  }
-
-  main {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-
-  .stages {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 1px;
-    background: var(--border);
-    flex: 1;
-    min-height: 380px;
-  }
-  @media (max-width: 760px) {
-    .stages { grid-template-columns: 1fr; }
-  }
-
-  .stage {
-    background: var(--bg);
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  .stage-label {
-    font-family: var(--mono);
-    font-size: 10px;
-    letter-spacing: 0.09em;
-    text-transform: uppercase;
-    color: var(--text-dim);
-    padding: 8px 14px;
-    display: flex;
-    justify-content: space-between;
-  }
-  .stage-canvas-wrap {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 8px 14px 16px;
-    min-height: 0;
-  }
-  .stage canvas {
-    max-width: 100%;
-    max-height: 100%;
-    background: #060608;
-    border-radius: 4px;
-    box-shadow: 0 0 0 1px var(--border);
-  }
-  #glCanvasVis { cursor: grab; touch-action: none; }
-  #glCanvasVis:active { cursor: grabbing; }
-  .hint-inline {
-    font-family: var(--mono);
-    font-size: 9.5px;
-    color: var(--text-dim);
-  }
-  .hint-warn { color: var(--warn); font-weight: 600; }
-
-  .panel {
-    border-top: 1px solid var(--border);
-    padding: 14px 20px;
-    display: flex;
-    gap: 26px;
-    flex-wrap: wrap;
-    overflow-x: auto;
-  }
-
-  .group { display: flex; flex-direction: column; gap: 8px; min-width: 130px; }
-  .group-label {
-    font-family: var(--mono);
-    font-size: 10px;
-    letter-spacing: 0.09em;
-    text-transform: uppercase;
-    color: var(--text-dim);
-  }
-
-  .field { display: flex; flex-direction: column; gap: 3px; }
-  .field-row {
-    display: flex;
-    justify-content: space-between;
-    gap: 10px;
-    font-family: var(--mono);
-    font-size: 11px;
-  }
-  .field-row span:last-child {
-    color: var(--accent);
-    font-variant-numeric: tabular-nums;
-  }
-  input[type="range"] {
-    -webkit-appearance: none;
-    width: 130px;
-    height: 3px;
-    background: var(--border);
-    border-radius: 2px;
-    outline: none;
-  }
-  input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 12px; height: 12px;
-    border-radius: 50%;
-    background: var(--accent);
-    cursor: pointer;
-    border: 2px solid var(--panel);
-    box-shadow: 0 0 0 1px var(--accent);
-  }
-  input[type="range"]::-moz-range-thumb {
-    width: 12px; height: 12px;
-    border-radius: 50%;
-    background: var(--accent);
-    cursor: pointer;
-    border: 2px solid var(--panel);
-    box-shadow: 0 0 0 1px var(--accent);
-  }
-
-  button {
-    font-family: var(--mono);
-    font-size: 10.5px;
-    letter-spacing: 0.03em;
-    text-transform: uppercase;
-    background: var(--panel);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 7px 10px;
-    cursor: pointer;
-    transition: border-color 0.15s ease, color 0.15s ease;
-  }
-  button:hover { border-color: var(--accent); color: var(--accent); }
-  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-  .btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
-
-  .swatches { display: flex; gap: 8px; }
-  .swatch-item { display: flex; flex-direction: column; align-items: center; gap: 3px; }
-  input[type="color"] {
-    width: 26px; height: 22px;
-    border-radius: 4px;
-    border: 1px solid var(--border);
-    background: none;
-    cursor: pointer;
-    padding: 0;
-  }
-  .swatch-item label { font-family: var(--mono); font-size: 8.5px; color: var(--text-dim); }
-
-  select {
-    width: 100%;
-    background: var(--panel);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 5px 6px;
-    font-family: var(--mono);
-    font-size: 11px;
-    cursor: pointer;
-  }
-  select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-
-  .upload-btn { display: inline-block; position: relative; overflow: hidden; }
-  .upload-btn input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
-</style>
-</head>
-<body>
-
-<header>
-  <div class="title-block">
-    <h1>PIXEL DISSOLVE</h1>
-    <span class="tag">prototype</span>
-  </div>
-  <div class="status" id="statusText">rendering</div>
-</header>
-
-<main>
-  <div class="stages">
-    <div class="stage">
-      <div class="stage-label"><span>3D — drag to orbit, right-drag to pan, scroll to scale</span><span class="hint-inline" id="orbitHint"></span></div>
-      <div class="stage-canvas-wrap"><canvas id="glCanvasVis" width="560" height="560"></canvas></div>
-    </div>
-    <div class="stage">
-      <div class="stage-label"><span>2D — live pixel-dissolve output</span></div>
-      <div class="stage-canvas-wrap"><canvas id="cv" width="700" height="700"></canvas></div>
-    </div>
-  </div>
-
-  <div class="panel">
-    <div class="group">
-      <div class="group-label">View</div>
-      <div class="btn-row">
-        <button id="autoRotBtn">Auto-rotate</button>
-        <button id="resetViewBtn">Reset view</button>
-      </div>
-    </div>
-
-    <div class="group">
-      <div class="group-label">Lighting</div>
-      <div class="field">
-        <div class="field-row"><span>Light intensity</span><span id="lightIntensityVal">1.15</span></div>
-        <input type="range" id="lightIntensity" min="0.4" max="2.5" step="0.05" value="1.15">
-      </div>
-      <div class="field">
-        <div class="field-row"><span>Light contrast</span><span id="lightContrastVal">0.85</span></div>
-        <input type="range" id="lightContrast" min="0" max="1" step="0.01" value="0.85">
-      </div>
-    </div>
-
-    <div class="group">
-      <div class="group-label">3D model</div>
-      <div class="btn-row">
-        <button class="upload-btn">Load OBJ<input type="file" id="objInput" accept=".obj"></button>
-        <button class="upload-btn">Load GLB<input type="file" id="glbInput" accept=".glb"></button>
-        <button id="resetModelBtn">Use flower</button>
-      </div>
-      <div class="hint" id="animHint" style="display:none">
-        <div class="btn-row">
-          <button id="animPlayBtn">▶ Play animation</button>
-          <button id="recordAnimBtn">⭳ Record animation (MP4)</button>
-        </div>
-      </div>
-      <div class="hint hint-warn" id="glbWarnHint" style="display:none"></div>
-    </div>
-
-    <div class="group">
-      <div class="group-label">Export</div>
-      <div class="field">
-        <div class="field-row"><span>PNG resolution</span><span id="exportScaleVal">2100×2100</span></div>
-        <input type="range" id="exportScale" min="1" max="6" step="1" value="3">
-      </div>
-      <div class="btn-row">
-        <button id="downloadPngBtn">⭳ PNG (alpha)</button>
-        <button id="recordBtn">● Record video</button>
-      </div>
-      <div class="hint" id="exportHint">downloads need this artifact's viewer permission</div>
-    </div>
-
-    <div class="group">
-      <div class="group-label">Frame sequence (alpha video)</div>
-      <div class="field">
-        <div class="field-row"><span>Duration (s)</span><span id="frameSeqDurVal">4.0</span></div>
-        <input type="range" id="frameSeqDur" min="1" max="20" step="0.5" value="4.0">
-      </div>
-      <div class="field">
-        <div class="field-row"><span>FPS</span><span id="frameSeqFpsVal">24</span></div>
-        <input type="range" id="frameSeqFps" min="12" max="60" step="1" value="24">
-      </div>
-      <div class="btn-row">
-        <button id="exportFramesBtn">⭳ Export frames (ZIP)</button>
-        <button id="frameSeqCancelBtn" style="display:none">Cancel</button>
-      </div>
-      <div class="hint" id="frameSeqStatus" style="display:none"></div>
-      <div class="hint">
-        Browsers can't produce real alpha-channel video files, so this renders every frame
-        individually (true transparency, no dropped/stuttered frames since it isn't tied to
-        real time) and bundles them as numbered PNGs into one ZIP — import that sequence into
-        your video tool to get the final alpha video. 3D source only; can take a while — higher
-        resolutions and frame counts take proportionally longer, and progress shows above.
-      </div>
-    </div>
-
-    <div class="group">
-      <div class="group-label">Source</div>
-      <div class="btn-row">
-        <button id="src3d" class="active">3D Flower</button>
-        <button id="srcImage">Image</button>
-        <button id="srcVideo">Video</button>
-      </div>
-      <div class="btn-row" id="uploadRow" style="display:none">
-        <button class="upload-btn">PNG<input type="file" id="pngInput" accept="image/png"></button>
-        <button class="upload-btn">MP4<input type="file" id="mp4Input" accept="video/mp4"></button>
-      </div>
-    </div>
-
-    <div class="group">
-      <div class="group-label">Halftone</div>
-      <div class="field">
-        <div class="field-row"><span>Resolution</span><span id="cellVal">130</span></div>
-        <input type="range" id="cellSize" min="40" max="260" step="1" value="130">
-      </div>
-      <div class="field">
-        <div class="field-row"><span>Base shape</span><span></span></div>
-        <select id="dotShape">
-          <option value="circle">Dot</option>
-          <option value="square">Square</option>
-          <option value="ascii">ASCII symbol</option>
-        </select>
-      </div>
-      <div class="field">
-        <div class="field-row"><span>Dot scale</span><span id="dotScaleVal">1.05</span></div>
-        <input type="range" id="dotScale" min="0.3" max="1.6" step="0.05" value="1.05">
-      </div>
-      <div class="field">
-        <div class="field-row"><span>Brightness curve</span><span id="dotGammaVal">0.85</span></div>
-        <input type="range" id="dotGamma" min="0.3" max="2.5" step="0.05" value="0.85">
-      </div>
-      <div class="field">
-        <div class="field-row"><span>Dust spread</span><span id="dissolveVal">0.22</span></div>
-        <input type="range" id="dissolve" min="0.06" max="0.6" step="0.01" value="0.22">
-      </div>
-      <div class="field">
-        <div class="field-row"><span>Dust spread randomness</span><span id="edgeRandVal">0.35</span></div>
-        <input type="range" id="edgeRand" min="0" max="1" step="0.01" value="0.35">
-      </div>
-    </div>
-
-    <div class="group">
-      <div class="group-label">Glow</div>
-      <div class="field">
-        <div class="field-row"><span>Glow amount</span><span id="glowAmtVal">0.60</span></div>
-        <input type="range" id="glowAmt" min="0" max="1.5" step="0.05" value="0.60">
-      </div>
-      <div class="field">
-        <div class="field-row"><span>Glow size</span><span id="glowSizeVal">1.00</span></div>
-        <input type="range" id="glowSize" min="0.2" max="3" step="0.1" value="1.00">
-      </div>
-    </div>
-
-    <div class="group">
-      <div class="group-label">Glitch</div>
-      <label class="field-row" style="align-items:center; cursor:pointer;">
-        <span>Color dispersion glitch</span>
-        <input type="checkbox" id="glitchEnabled">
-      </label>
-      <div class="field">
-        <div class="field-row"><span>Frequency (bursts/sec)</span><span id="glitchFreqVal">0.50</span></div>
-        <input type="range" id="glitchFreq" min="0.05" max="4" step="0.05" value="0.50">
-      </div>
-      <div class="field">
-        <div class="field-row"><span>Intensity</span><span id="glitchIntensityVal">10</span></div>
-        <input type="range" id="glitchIntensity" min="1" max="35" step="1" value="10">
-      </div>
-      <div class="field">
-        <div class="field-row"><span>Duration (ms)</span><span id="glitchDurationVal">130</span></div>
-        <input type="range" id="glitchDuration" min="20" max="400" step="10" value="130">
-      </div>
-      <div class="field">
-        <div class="field-row"><span>ASCII symbol size</span><span id="glitchAsciiSizeVal">0.45</span></div>
-        <input type="range" id="glitchAsciiSize" min="0.1" max="1.6" step="0.05" value="0.45">
-      </div>
-      <div class="swatches">
-        <div class="swatch-item"><input type="color" id="glitchColor0" value="#ff2050"><label>1</label></div>
-        <div class="swatch-item"><input type="color" id="glitchColor1" value="#20ff90"><label>2</label></div>
-        <div class="swatch-item"><input type="color" id="glitchColor2" value="#3090ff"><label>3</label></div>
-      </div>
-      <div class="btn-row">
-        <button id="glitchReseedBtn">↻ Reseed glitch</button>
-      </div>
-      <div class="hint">holds still (no auto-flicker) whenever the model isn't actively animating — use reseed to get a new look</div>
-    </div>
-
-    <div class="group">
-      <div class="group-label">Edge style</div>
-      <div class="field">
-        <div class="field-row"><span>Dust amount</span><span id="dustVal">0.30</span></div>
-        <input type="range" id="dustAmt" min="0" max="1" step="0.01" value="0.30">
-      </div>
-      <div class="field">
-        <div class="field-row"><span>ASCII marks</span><span id="asciiVal">0.25</span></div>
-        <input type="range" id="asciiAmt" min="0" max="1" step="0.01" value="0.25">
-      </div>
-      <div class="field">
-        <div class="field-row"><span>ASCII size</span><span id="asciiSizeVal">1.00</span></div>
-        <input type="range" id="asciiSize" min="0.3" max="2.5" step="0.05" value="1.00">
-      </div>
-      <div class="btn-row">
-        <button id="asciiColorModeBtn">Accent colors</button>
-      </div>
-      <div class="swatches">
-        <div class="swatch-item"><input type="color" id="asciiColor" value="#ffffff"><label>ascii</label></div>
-      </div>
-    </div>
-
-    <div class="group">
-      <div class="group-label">Body color</div>
-      <div class="swatches">
-        <div class="swatch-item"><input type="color" id="bodyCol" value="#ffffff"><label>body</label></div>
-      </div>
-    </div>
-
-    <div class="group">
-      <div class="group-label">Edge accent colors</div>
-      <div class="swatches">
-        <div class="swatch-item"><input type="color" id="col0" value="#ffffff"><label>1</label></div>
-        <div class="swatch-item"><input type="color" id="col1" value="#ffffff"><label>2</label></div>
-        <div class="swatch-item"><input type="color" id="col2" value="#ffffff"><label>3</label></div>
-        <div class="swatch-item"><input type="color" id="col3" value="#ffffff"><label>4</label></div>
-      </div>
-      <div class="field">
-        <div class="field-row"><span>Accent amount</span><span id="accentAmtVal">0.30</span></div>
-        <input type="range" id="accentAmt" min="0" max="1" step="0.01" value="0.30">
-      </div>
-    </div>
-
-    <div class="group">
-      <div class="group-label">Seed</div>
-      <div class="btn-row"><button id="reseedBtn">↻ Reseed</button></div>
-    </div>
-  </div>
-</main>
-
-<canvas id="glCanvasSample" width="1" height="1" style="display:none"></canvas>
-<video id="videoEl" style="display:none" muted loop playsinline></video>
-
-<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-<script>
-(function () {
-  const canvas = document.getElementById('cv');
-  const ctx = canvas.getContext('2d');
+export function initPixelDissolveEngine() {
+  const canvas = document.getElementById('cv') as HTMLCanvasElement;
+  const ctx = canvas.getContext('2d')!;
   const CW = canvas.width, CH = canvas.height;
 
   let palette = ['#ffffff', '#ffffff', '#ffffff', '#ffffff'];
   let bodyColor = '#ffffff';
   let accentAmt = 0.30;
   ['col0', 'col1', 'col2', 'col3'].forEach((id, idx) => {
-    document.getElementById(id).addEventListener('input', (e) => { palette[idx] = e.target.value; });
+    document.getElementById(id)!.addEventListener('input', (e) => { palette[idx] = (e.target as HTMLInputElement).value; });
   });
-  document.getElementById('bodyCol').addEventListener('input', (e) => { bodyColor = e.target.value; });
-  document.getElementById('accentAmt').addEventListener('input', (e) => {
-    accentAmt = parseFloat(e.target.value);
-    document.getElementById('accentAmtVal').textContent = accentAmt.toFixed(2);
-  });
+  document.getElementById('bodyCol')!.addEventListener('input', (e) => { bodyColor = (e.target as HTMLInputElement).value; });
+  // accentAmt is a slider, driven from React state — see the returned controller at the
+  // bottom of this function instead of a getElementById listener here.
 
   let asciiColor = '#ffffff';
   let asciiColorMode = 'accent'; // 'accent' = same accent/body system as other cells | 'fixed' = asciiColor
-  document.getElementById('asciiColor').addEventListener('input', (e) => { asciiColor = e.target.value; });
-  document.getElementById('asciiColorModeBtn').addEventListener('click', (e) => {
+  document.getElementById('asciiColor')!.addEventListener('input', (e) => { asciiColor = (e.target as HTMLInputElement).value; });
+  document.getElementById('asciiColorModeBtn')!.addEventListener('click', (e) => {
     asciiColorMode = asciiColorMode === 'accent' ? 'fixed' : 'accent';
-    e.target.textContent = asciiColorMode === 'accent' ? 'Accent colors' : 'Fixed color';
-    e.target.classList.toggle('active', asciiColorMode === 'fixed');
+    const t = e.target as HTMLElement;
+    t.textContent = asciiColorMode === 'accent' ? 'Accent colors' : 'Fixed color';
+    t.classList.toggle('active', asciiColorMode === 'fixed');
   });
 
   let seed = 1337;
@@ -522,8 +49,8 @@
 
 
   // ================= WebGL: minimal, no external libs =================
-  const glCanvasVis = document.getElementById('glCanvasVis');
-  let gl = null, glProgram = null, glBuffer = null, glVertCount = 0, glUniforms = {};
+  const glCanvasVis = document.getElementById('glCanvasVis') as HTMLCanvasElement;
+  let gl = null, glProgram = null, glBuffer = null, glVertCount = 0, glUniforms: any = {};
   let glOk = false;
 
   function m4Multiply(a, b) {
@@ -797,19 +324,19 @@
     }
     return flat;
   }
-  document.getElementById('objInput').addEventListener('change', (e) => {
-    const file = e.target.files[0];
+  document.getElementById('objInput')!.addEventListener('change', (e) => {
+    const file = (e.target as HTMLInputElement).files[0];
     if (!file || !glOk) return;
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        const flat = parseOBJ(reader.result);
+        const flat = parseOBJ(reader.result as string);
         uploadMeshToGL(flat);
         usingCustomModel = true;
         modelIsGLB = false;
         currentAnim = null;
         animPlaying = false;
-        document.getElementById('animHint').style.display = 'none';
+        document.getElementById('animHint')!.style.display = 'none';
         setGlbWarning(null);
         userRotY = 0.626; userRotX = 0.167; userPanX = 0; userPanY = 0; userScale = 1;
         setSource('3d');
@@ -820,13 +347,13 @@
     };
     reader.readAsText(file);
   });
-  document.getElementById('resetModelBtn').addEventListener('click', () => {
+  document.getElementById('resetModelBtn')!.addEventListener('click', () => {
     if (!glOk || !flowerVertsCache) return;
     uploadMeshToGL(flowerVertsCache);
     usingCustomModel = false;
     modelIsGLB = false;
     currentAnim = null;
-    document.getElementById('animHint').style.display = 'none';
+    document.getElementById('animHint')!.style.display = 'none';
     setGlbWarning(null);
     userRotY = 0.626; userRotX = 0.167; userPanX = 0; userPanY = 0; userScale = 1;
     setSource('3d');
@@ -997,6 +524,7 @@
     if (json.skins && json.skins.length) {
       warnings.push("This model uses skeletal/bone animation (skinning), which isn't supported — it's shown in its bind pose instead of animating.");
     }
+
     // recenter on the mesh's own area-weighted centroid, not the bounding-box center, so it
     // both appears centered in the viewport and orbits around roughly its center of mass
     const centroid = computeMeshCentroid(triPos);
@@ -1010,7 +538,7 @@
     let anim = null;
     if (json.animations && json.animations.length) {
       const a = json.animations[0];
-      const channels = {};
+      const channels: any = {};
       let duration = 0;
       for (const ch of a.channels) {
         const sampler = a.samplers[ch.sampler];
@@ -1096,12 +624,12 @@
 
   const GLB_SIZE_WARN_BYTES = 20 * 1024 * 1024; // 20MB — a browser-side per-frame renderer, not a game engine
   function setGlbWarning(text) {
-    const el = document.getElementById('glbWarnHint');
-    if (text) { el.textContent = text; el.style.display = 'block'; }
-    else { el.textContent = ''; el.style.display = 'none'; }
+    const el = document.getElementById('glbWarnHint')!;
+    if (text) { el.textContent = text; (el as HTMLElement).style.display = 'block'; }
+    else { el.textContent = ''; (el as HTMLElement).style.display = 'none'; }
   }
-  document.getElementById('glbInput').addEventListener('change', (e) => {
-    const file = e.target.files[0];
+  document.getElementById('glbInput')!.addEventListener('change', (e) => {
+    const file = (e.target as HTMLInputElement).files[0];
     if (!file || !glOk) return;
     setGlbWarning(null);
     const fileWarnings = [];
@@ -1111,7 +639,7 @@
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        const { json, bin } = parseGLB(reader.result);
+        const { json, bin } = parseGLB(reader.result as ArrayBuffer);
         const { flat, anim, warnings } = glbToMeshAndAnim(json, bin);
         uploadMeshToGL(flat);
         usingCustomModel = true;
@@ -1119,9 +647,9 @@
         currentAnim = anim;
         animTime = 0;
         animPlaying = false;
-        document.getElementById('animPlayBtn').textContent = '▶ Play animation';
-        document.getElementById('animPlayBtn').classList.remove('active');
-        document.getElementById('animHint').style.display = anim ? 'block' : 'none';
+        document.getElementById('animPlayBtn')!.textContent = '▶ Play animation';
+        document.getElementById('animPlayBtn')!.classList.remove('active');
+        (document.getElementById('animHint') as HTMLElement)!.style.display = anim ? 'block' : 'none';
         userRotY = 0.626; userRotX = 0.167; userPanX = 0; userPanY = 0; userScale = 1;
         setSource('3d');
         setGlbWarning(fileWarnings.concat(warnings).join(' ') || null);
@@ -1133,10 +661,11 @@
     };
     reader.readAsArrayBuffer(file);
   });
-  document.getElementById('animPlayBtn').addEventListener('click', (e) => {
+  document.getElementById('animPlayBtn')!.addEventListener('click', (e) => {
     animPlaying = !animPlaying;
-    e.target.textContent = animPlaying ? '⏸ Pause animation' : '▶ Play animation';
-    e.target.classList.toggle('active', animPlaying);
+    const t = e.target as HTMLElement;
+    t.textContent = animPlaying ? '⏸ Pause animation' : '▶ Play animation';
+    t.classList.toggle('active', animPlaying);
   });
 
   let lightIntensity = 1.15, lightContrast = 0.85;
@@ -1188,21 +717,15 @@
   }, { passive: false });
   glCanvasVis.addEventListener('contextmenu', (e) => e.preventDefault());
 
-  document.getElementById('autoRotBtn').addEventListener('click', (e) => {
+  document.getElementById('autoRotBtn')!.addEventListener('click', (e) => {
     autoRotate = !autoRotate;
-    e.target.classList.toggle('active', autoRotate);
+    (e.target as HTMLElement).classList.toggle('active', autoRotate);
   });
-  document.getElementById('resetViewBtn').addEventListener('click', () => {
+  document.getElementById('resetViewBtn')!.addEventListener('click', () => {
     userRotY = 0.626; userRotX = 0.167; userPanX = 0; userPanY = 0; userScale = 1;
   });
-  document.getElementById('lightIntensity').addEventListener('input', (e) => {
-    lightIntensity = parseFloat(e.target.value);
-    document.getElementById('lightIntensityVal').textContent = lightIntensity.toFixed(2);
-  });
-  document.getElementById('lightContrast').addEventListener('input', (e) => {
-    lightContrast = parseFloat(e.target.value);
-    document.getElementById('lightContrastVal').textContent = lightContrast.toFixed(2);
-  });
+  // lightIntensity / lightContrast are sliders, driven from React state — see the returned
+  // controller at the bottom of this function.
 
   function renderWebGLFrame(mode) {
     // mode: 'nogrid-lit' (mask + shading, sampled for the silhouette and per-cell luminance) |
@@ -1247,36 +770,36 @@
   let externalMask = null;
   let externalLumGrid = null;
 
-  document.getElementById('src3d').addEventListener('click', () => setSource('3d'));
-  document.getElementById('srcImage').addEventListener('click', () => setSource('image'));
-  document.getElementById('srcVideo').addEventListener('click', () => setSource('video'));
+  document.getElementById('src3d')!.addEventListener('click', () => setSource('3d'));
+  document.getElementById('srcImage')!.addEventListener('click', () => setSource('image'));
+  document.getElementById('srcVideo')!.addEventListener('click', () => setSource('video'));
 
   function setSource(mode) {
     sourceMode = mode;
-    ['src3d','srcImage','srcVideo'].forEach(id => document.getElementById(id).classList.remove('active'));
-    document.getElementById('src' + (mode==='3d'?'3d':mode.charAt(0).toUpperCase()+mode.slice(1))).classList.add('active');
-    document.getElementById('uploadRow').style.display = mode === '3d' ? 'none' : 'flex';
-    glCanvasVis.style.opacity = mode === '3d' ? '1' : '0.35';
+    ['src3d','srcImage','srcVideo'].forEach(id => document.getElementById(id)!.classList.remove('active'));
+    document.getElementById('src' + (mode==='3d'?'3d':mode.charAt(0).toUpperCase()+mode.slice(1)))!.classList.add('active');
+    (document.getElementById('uploadRow') as HTMLElement)!.style.display = mode === '3d' ? 'none' : 'flex';
+    (glCanvasVis as HTMLElement).style.opacity = mode === '3d' ? '1' : '0.35';
     if (mode === 'video') videoEl.play().catch(() => {});
     if (mode === '3d' && !glOk) externalMask = null;
   }
 
-  document.getElementById('pngInput').addEventListener('change', (e) => {
-    const file = e.target.files[0]; if (!file) return;
+  document.getElementById('pngInput')!.addEventListener('change', (e) => {
+    const file = (e.target as HTMLInputElement).files[0]; if (!file) return;
     const img = new Image();
     img.onload = () => { externalMask = sampleImageToMask(img, cols(), rows(), 'alpha'); setSource('image'); };
     img.src = URL.createObjectURL(file);
   });
-  const videoEl = document.getElementById('videoEl');
-  document.getElementById('mp4Input').addEventListener('change', (e) => {
-    const file = e.target.files[0]; if (!file) return;
+  const videoEl = document.getElementById('videoEl') as HTMLVideoElement;
+  document.getElementById('mp4Input')!.addEventListener('change', (e) => {
+    const file = (e.target as HTMLInputElement).files[0]; if (!file) return;
     videoEl.src = URL.createObjectURL(file);
     videoEl.addEventListener('loadeddata', () => setSource('video'), { once: true });
   });
 
   function sampleImageToMask(src, c, r, mode) {
     const off = document.createElement('canvas'); off.width=c; off.height=r;
-    const octx = off.getContext('2d');
+    const octx = off.getContext('2d')!;
     octx.clearRect(0,0,c,r);
     const iw = src.videoWidth || src.naturalWidth || src.width;
     const ih = src.videoHeight || src.naturalHeight || src.height;
@@ -1302,7 +825,7 @@
 
   function sampleLitGrid(src, c, r) {
     const off = document.createElement('canvas'); off.width=c; off.height=r;
-    const octx = off.getContext('2d');
+    const octx = off.getContext('2d')!;
     octx.clearRect(0,0,c,r);
     const iw = src.videoWidth || src.naturalWidth || src.width;
     const ih = src.videoHeight || src.naturalHeight || src.height;
@@ -1416,19 +939,19 @@
   // band edges it fades out, cross-fading smoothly back into the untouched original instead of
   // cutting off sharply. That also means it's naturally correct for both the opaque live canvas
   // and the transparent PNG export, with no separate case needed for either.
-  function drawColorDispersionGlitch(targetCtx, w, h, bandsOverride) {
+  function drawColorDispersionGlitch(targetCtx, w, h, bandsOverride?) {
     // an ASCII-shaped render of this same frame, kept transparent outside the actual shapes —
     // only ever shown inside the glitch bands, so the shape-break reads as "this strip
     // corrupted", not a global shape change. Sized independently of the normal dot scale via
     // glitchAsciiSize, so the glyphs can be tuned smaller without affecting the base render.
     glitchAsciiSnap.width = w; glitchAsciiSnap.height = h;
-    const actx = glitchAsciiSnap.getContext('2d');
+    const actx = glitchAsciiSnap.getContext('2d')!;
     drawCells(actx, w, h, 'ascii', glitchAsciiSize);
 
     for (let ci = 0; ci < 3; ci++) {
       const t = glitchTints[ci];
       t.width = w; t.height = h;
-      const tctx = t.getContext('2d');
+      const tctx = t.getContext('2d')!;
       tctx.drawImage(glitchAsciiSnap, 0, 0);
       // 'source-atop' recolors only the pixels the ascii shapes actually cover, keeping their
       // alpha — 'multiply' looked identical live (the canvas is opaque everywhere there) but
@@ -1440,7 +963,7 @@
     }
 
     glitchBandLayer.width = w; glitchBandLayer.height = h;
-    const blctx = glitchBandLayer.getContext('2d');
+    const blctx = glitchBandLayer.getContext('2d')!;
 
     for (const band of (bandsOverride || glitchBands)) {
       const y0 = Math.round(band.y0 * h);
@@ -1470,37 +993,21 @@
       targetCtx.drawImage(glitchBandLayer, 0, y0, w, bh, 0, y0, w, bh);
     }
   }
-  document.getElementById('glitchEnabled').addEventListener('change', (e) => {
-    glitchEnabled = e.target.checked;
-  });
-  document.getElementById('glitchFreq').addEventListener('input', (e) => {
-    glitchFrequency = parseFloat(e.target.value);
-    document.getElementById('glitchFreqVal').textContent = glitchFrequency.toFixed(2);
-  });
-  document.getElementById('glitchIntensity').addEventListener('input', (e) => {
-    glitchIntensity = parseFloat(e.target.value);
-    document.getElementById('glitchIntensityVal').textContent = glitchIntensity;
-  });
-  document.getElementById('glitchDuration').addEventListener('input', (e) => {
-    glitchDuration = parseFloat(e.target.value);
-    document.getElementById('glitchDurationVal').textContent = glitchDuration;
-  });
-  document.getElementById('glitchAsciiSize').addEventListener('input', (e) => {
-    glitchAsciiSize = parseFloat(e.target.value);
-    document.getElementById('glitchAsciiSizeVal').textContent = glitchAsciiSize.toFixed(2);
-  });
+  // glitchEnabled (switch) and glitchFreq/glitchIntensity/glitchDuration/glitchAsciiSize
+  // (sliders) are driven from React state — see the returned controller at the bottom of
+  // this function. Colors stay native <input type="color">, wired below as before.
   ['glitchColor0', 'glitchColor1', 'glitchColor2'].forEach((id, idx) => {
-    document.getElementById(id).addEventListener('input', (e) => { glitchColors[idx] = e.target.value; });
+    document.getElementById(id)!.addEventListener('input', (e) => { glitchColors[idx] = (e.target as HTMLInputElement).value; });
   });
-  document.getElementById('glitchReseedBtn').addEventListener('click', () => {
+  document.getElementById('glitchReseedBtn')!.addEventListener('click', () => {
     glitchEnabled = true;
-    document.getElementById('glitchEnabled').checked = true;
+    (document.getElementById('glitchEnabled') as HTMLInputElement).checked = true;
     glitchBands = generateGlitchBands();
     glitchActive = true;
     glitchManualHold = true; // holds this look until the model starts actually animating again
   });
   const asciiGlyphs = ['+', '-', 'x'];
-  let cells = [];
+  let cells: any[] = [];
   let colsN = cellSize, rowsN = Math.round(cellSize * (CH/CW));
   function cols(){ return colsN; }
   function rows(){ return rowsN; }
@@ -1603,7 +1110,7 @@
     }
   }
 
-  function drawCells(targetCtx, targetW, targetH, shapeOverride, dotScaleOverride) {
+  function drawCells(targetCtx, targetW, targetH, shapeOverride?, dotScaleOverride?) {
     const c=colsN;
     const footW = targetW/c;
     const shape = shapeOverride || dotShape;
@@ -1662,53 +1169,13 @@
     // corrupted horizontal bands (color split + ASCII shapes) drawn on top, localized only —
     // see drawColorDispersionGlitch
     if (glitchActive) drawColorDispersionGlitch(ctx, CW, CH);
-    document.getElementById('statusText').textContent = rendered + ' cells' + (glOk ? '' : ' · WebGL unavailable, using flat fallback');
+    document.getElementById('statusText')!.textContent = rendered + ' cells' + (glOk ? '' : ' · WebGL unavailable, using flat fallback');
   }
 
-  document.getElementById('cellSize').addEventListener('input', (e) => {
-    cellSize = parseInt(e.target.value,10);
-    document.getElementById('cellVal').textContent = cellSize;
-  });
-  document.getElementById('dotScale').addEventListener('input', (e) => {
-    dotScale = parseFloat(e.target.value);
-    document.getElementById('dotScaleVal').textContent = dotScale.toFixed(2);
-  });
-  document.getElementById('dotGamma').addEventListener('input', (e) => {
-    dotGamma = parseFloat(e.target.value);
-    document.getElementById('dotGammaVal').textContent = dotGamma.toFixed(2);
-  });
-  document.getElementById('dotShape').addEventListener('change', (e) => {
-    dotShape = e.target.value;
-  });
-  document.getElementById('glowAmt').addEventListener('input', (e) => {
-    glowAmt = parseFloat(e.target.value);
-    document.getElementById('glowAmtVal').textContent = glowAmt.toFixed(2);
-  });
-  document.getElementById('glowSize').addEventListener('input', (e) => {
-    glowSize = parseFloat(e.target.value);
-    document.getElementById('glowSizeVal').textContent = glowSize.toFixed(2);
-  });
-  document.getElementById('dissolve').addEventListener('input', (e) => {
-    dissolveSpread = parseFloat(e.target.value);
-    document.getElementById('dissolveVal').textContent = dissolveSpread.toFixed(2);
-  });
-  document.getElementById('edgeRand').addEventListener('input', (e) => {
-    edgeRandomness = parseFloat(e.target.value);
-    document.getElementById('edgeRandVal').textContent = edgeRandomness.toFixed(2);
-  });
-  document.getElementById('dustAmt').addEventListener('input', (e) => {
-    dustAmt = parseFloat(e.target.value);
-    document.getElementById('dustVal').textContent = dustAmt.toFixed(2);
-  });
-  document.getElementById('asciiAmt').addEventListener('input', (e) => {
-    asciiAmt = parseFloat(e.target.value);
-    document.getElementById('asciiVal').textContent = asciiAmt.toFixed(2);
-  });
-  document.getElementById('asciiSize').addEventListener('input', (e) => {
-    asciiSize = parseFloat(e.target.value);
-    document.getElementById('asciiSizeVal').textContent = asciiSize.toFixed(2);
-  });
-  document.getElementById('reseedBtn').addEventListener('click', () => { seed = Math.floor(Math.random()*1e9); });
+  // cellSize/dotScale/dotGamma/dotShape/glowAmt/glowSize/dissolve/edgeRand/dustAmt/asciiAmt/
+  // asciiSize are sliders (or the shape select) driven from React state — see the returned
+  // controller at the bottom of this function.
+  document.getElementById('reseedBtn')!.addEventListener('click', () => { seed = Math.floor(Math.random()*1e9); });
 
   // ================= master loop =================
   let lastTs = 0;
@@ -1741,7 +1208,7 @@
 
   // ================= downloads: PNG (alpha), video recording, frame-sequence ZIP =================
   // Plain browser downloads — no capability gating, no per-file size cap, no allowlisted
-  // extensions. JSZip (loaded via CDN in the page head) builds the frame-sequence archive.
+  // extensions. JSZip builds the frame-sequence archive.
   function downloadBlob(blob, filename) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1754,32 +1221,22 @@
   }
   let exportScale = 3;
   let frameSeqDuration = 4.0, frameSeqFps = 24;
-  const downloadPngBtn = document.getElementById('downloadPngBtn');
-  const recordBtn = document.getElementById('recordBtn');
-  const recordAnimBtn = document.getElementById('recordAnimBtn');
-  const exportFramesBtn = document.getElementById('exportFramesBtn');
-  const frameSeqCancelBtn = document.getElementById('frameSeqCancelBtn');
-  const frameSeqStatus = document.getElementById('frameSeqStatus');
-  const exportHint = document.getElementById('exportHint');
-  function setFrameSeqStatus(text, isWarn) {
-    if (!text) { frameSeqStatus.style.display = 'none'; return; }
+  const downloadPngBtn = document.getElementById('downloadPngBtn')!;
+  const recordBtn = document.getElementById('recordBtn')!;
+  const recordAnimBtn = document.getElementById('recordAnimBtn')!;
+  const exportFramesBtn = document.getElementById('exportFramesBtn') as HTMLButtonElement;
+  const frameSeqCancelBtn = document.getElementById('frameSeqCancelBtn')!;
+  const frameSeqStatus = document.getElementById('frameSeqStatus')!;
+  const exportHint = document.getElementById('exportHint')!;
+  function setFrameSeqStatus(text, isWarn?) {
+    if (!text) { (frameSeqStatus as HTMLElement).style.display = 'none'; return; }
     frameSeqStatus.textContent = text;
     frameSeqStatus.classList.toggle('hint-warn', !!isWarn);
-    frameSeqStatus.style.display = '';
+    (frameSeqStatus as HTMLElement).style.display = '';
   }
 
-  document.getElementById('exportScale').addEventListener('input', (e) => {
-    exportScale = parseInt(e.target.value, 10);
-    document.getElementById('exportScaleVal').textContent = (CW*exportScale) + '×' + (CH*exportScale);
-  });
-  document.getElementById('frameSeqDur').addEventListener('input', (e) => {
-    frameSeqDuration = parseFloat(e.target.value);
-    document.getElementById('frameSeqDurVal').textContent = frameSeqDuration.toFixed(1);
-  });
-  document.getElementById('frameSeqFps').addEventListener('input', (e) => {
-    frameSeqFps = parseInt(e.target.value, 10);
-    document.getElementById('frameSeqFpsVal').textContent = frameSeqFps;
-  });
+  // exportScale/frameSeqDuration/frameSeqFps are sliders driven from React state — see the
+  // returned controller at the bottom of this function.
 
   exportHint.textContent = 'downloads save straight to your browser\'s downloads folder';
 
@@ -1787,7 +1244,7 @@
     const exportW = CW * exportScale, exportH = CH * exportScale;
     const off = document.createElement('canvas');
     off.width = exportW; off.height = exportH;
-    const octx = off.getContext('2d');
+    const octx = off.getContext('2d')!;
     drawCells(octx, exportW, exportH); // no background fill: stays transparent
     // Bake a fresh glitch burst into this still capture when the effect is turned on — a static
     // OBJ upload has no animation to glitch live over time, so this is how the effect reaches a
@@ -1799,7 +1256,7 @@
     }, 'image/png');
   });
 
-  let mediaRecorder = null, recordedChunks = [], autoStopTimer = null;
+  let mediaRecorder = null, recordedChunks: any[] = [], autoStopTimer: any = null;
   function pickVideoMime() {
     if (typeof MediaRecorder === 'undefined') return null;
     if (MediaRecorder.isTypeSupported('video/mp4')) return 'video/mp4';
@@ -1810,11 +1267,11 @@
   // Shared by both the manual record button and the GLB "one clean loop" button below. Returns
   // the MediaRecorder on success so the caller can decide how/when to stop it, or null if
   // recording couldn't start (no downloads permission, already recording, unsupported browser).
-  function startRecording(filenameBase, onStopped) {
+  function startRecording(filenameBase, onStopped?) {
     if (mediaRecorder && mediaRecorder.state === 'recording') return null;
     const mime = pickVideoMime();
     if (!mime) { alert('Video recording is not supported in this browser.'); return null; }
-    const stream = canvas.captureStream(30);
+    const stream = (canvas as any).captureStream(30);
     recordedChunks = [];
     mediaRecorder = new MediaRecorder(stream, { mimeType: mime });
     mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) recordedChunks.push(e.data); };
@@ -1851,7 +1308,7 @@
     if (mediaRecorder && mediaRecorder.state === 'recording') return;
     animTime = 0;
     animPlaying = true;
-    const animPlayBtnEl = document.getElementById('animPlayBtn');
+    const animPlayBtnEl = document.getElementById('animPlayBtn')!;
     animPlayBtnEl.textContent = '⏸ Pause animation';
     animPlayBtnEl.classList.add('active');
     const rec = startRecording('pixel-dissolve-animation', () => {
@@ -1887,7 +1344,7 @@
     frameSeqCancelRequested = false;
     const origText = exportFramesBtn.textContent;
     exportFramesBtn.disabled = true;
-    frameSeqCancelBtn.style.display = '';
+    (frameSeqCancelBtn as HTMLElement).style.display = '';
     setFrameSeqStatus('Starting…');
 
     // save everything this export is about to drive, so the live view picks back up exactly
@@ -1929,7 +1386,7 @@
 
         const off = document.createElement('canvas');
         off.width = exportW; off.height = exportH;
-        const octx = off.getContext('2d');
+        const octx = off.getContext('2d')!;
         drawCells(octx, exportW, exportH); // no background fill: stays transparent
 
         if (glitchEnabled) {
@@ -1940,7 +1397,7 @@
 
         const blob = await new Promise((resolve) => off.toBlob(resolve, 'image/png'));
         if (!blob) throw new Error(`Frame ${f+1} failed to encode (canvas may be too large for this browser — try a lower PNG resolution).`);
-        zip.file(`frame_${String(f+1).padStart(pad,'0')}.png`, blob);
+        zip.file(`frame_${String(f+1).padStart(pad,'0')}.png`, blob as Blob);
 
         // yield a tick so the tab stays responsive and the progress text actually paints
         await new Promise((r) => setTimeout(r, 0));
@@ -1953,7 +1410,7 @@
       });
       downloadBlob(zipBlob, `pixel-dissolve-frames-${exportW}x${exportH}.zip`);
       setFrameSeqStatus(`Done — ${totalFrames} frames saved.`);
-    } catch (err) {
+    } catch (err: any) {
       console.warn('Frame sequence export failed:', err);
       const cancelled = err && err.message === 'Cancelled.';
       setFrameSeqStatus(cancelled ? 'Cancelled.' : `Failed: ${err && err.message ? err.message : err}`, !cancelled);
@@ -1964,14 +1421,41 @@
       glitchManualHold = saved.glitchManualHold;
       exportFramesBtn.textContent = origText;
       exportFramesBtn.disabled = false;
-      frameSeqCancelBtn.style.display = 'none';
+      (frameSeqCancelBtn as HTMLElement).style.display = 'none';
       exportingFrames = false;
     }
   });
 
   setSource('3d');
   requestAnimationFrame(masterLoop);
-})();
-</script>
-</body>
-</html>
+
+  // Setters for the controls now rendered as real shadcn/Base UI components (Slider, Select,
+  // Switch) instead of native inputs the engine could wire up by id itself — React owns these
+  // controls' state and display value, and just pushes changes into the engine's own variables.
+  return {
+    setLightIntensity(v: number) { lightIntensity = v; },
+    setLightContrast(v: number) { lightContrast = v; },
+    setExportScale(v: number) { exportScale = v; },
+    setFrameSeqDuration(v: number) { frameSeqDuration = v; },
+    setFrameSeqFps(v: number) { frameSeqFps = v; },
+    setCellSize(v: number) { cellSize = v; },
+    setDotScale(v: number) { dotScale = v; },
+    setDotGamma(v: number) { dotGamma = v; },
+    setDotShape(v: string) { dotShape = v; },
+    setGlowAmt(v: number) { glowAmt = v; },
+    setGlowSize(v: number) { glowSize = v; },
+    setDissolveSpread(v: number) { dissolveSpread = v; },
+    setEdgeRandomness(v: number) { edgeRandomness = v; },
+    setDustAmt(v: number) { dustAmt = v; },
+    setAsciiAmt(v: number) { asciiAmt = v; },
+    setAsciiSize(v: number) { asciiSize = v; },
+    setAccentAmt(v: number) { accentAmt = v; },
+    setGlitchEnabled(v: boolean) { glitchEnabled = v; },
+    setGlitchFrequency(v: number) { glitchFrequency = v; },
+    setGlitchIntensity(v: number) { glitchIntensity = v; },
+    setGlitchDuration(v: number) { glitchDuration = v; },
+    setGlitchAsciiSize(v: number) { glitchAsciiSize = v; },
+  };
+}
+
+export type PixelDissolveEngine = ReturnType<typeof initPixelDissolveEngine>;
