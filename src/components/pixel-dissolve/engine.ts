@@ -50,8 +50,9 @@ export function initPixelDissolveEngine() {
 
   // ================= WebGL: minimal, no external libs =================
   const glCanvasVis = document.getElementById('glCanvasVis') as HTMLCanvasElement;
-  let gl = null, glProgram = null, glBuffer = null, glVertCount = 0, glUniforms: any = {};
+  let gl = null, glProgram = null, glUniforms: any = {};
   let glOk = false;
+  const IDENTITY4 = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
 
   function m4Multiply(a, b) {
     const out = new Float32Array(16);
@@ -146,8 +147,6 @@ export function initPixelDissolveEngine() {
     return flat;
   }
 
-  let glNormalBuffer = null;
-
   function compileProgram(vsSrc, fsSrc) {
     function compile(type, src) {
       const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
@@ -205,20 +204,6 @@ export function initPixelDissolveEngine() {
     return [cx/totalArea, cy/totalArea, cz/totalArea];
   }
 
-  // Radius of the smallest sphere centered on the origin that contains every vertex. Called on
-  // an already-recentered mesh (centroid subtracted), so this is exactly the model's true extent
-  // around its own rotation pivot — used to place the camera so the model actually fills the
-  // frame, instead of a fixed camera distance that only looked right for the specific proportions
-  // of the procedural flower it was originally tuned against.
-  function boundingSphereRadius(flat) {
-    let maxSq = 0;
-    for (let i = 0; i < flat.length; i += 3) {
-      const x = flat[i], y = flat[i+1], z = flat[i+2];
-      const d = x*x + y*y + z*z;
-      if (d > maxSq) maxSq = d;
-    }
-    return Math.sqrt(maxSq) || 1;
-  }
 
   function initWebGL() {
     try {
@@ -284,9 +269,10 @@ export function initPixelDissolveEngine() {
       glUniforms.uLightContrast = gl.getUniformLocation(glProgram, 'uLightContrast');
 
       flowerVertsCache = buildFlowerVertices();
-      glBuffer = gl.createBuffer();
-      glNormalBuffer = gl.createBuffer();
-      uploadMeshToGL(flowerVertsCache);
+      loadModelParts(
+        [{ nodeIndex: -1, localTriPos: flowerVertsCache, parentMatrix: IDENTITY4, localMatrix: IDENTITY4, anim: null }],
+        IDENTITY4
+      );
 
       gl.enable(gl.DEPTH_TEST);
       gl.disable(gl.CULL_FACE);
@@ -297,17 +283,69 @@ export function initPixelDissolveEngine() {
   let usingCustomModel = false;
   let modelIsGLB = false; // true only for GLB uploads — OBJ has no defined up-axis convention
   let modelFitRadius = 1; // bounding-sphere radius of whatever's currently loaded; drives camera fit
-  function uploadMeshToGL(flat) {
-    gl.bindBuffer(gl.ARRAY_BUFFER, glBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, flat, gl.STATIC_DRAW);
-    glVertCount = flat.length / 3;
-    const normals = computeFlatNormals(flat);
-    gl.bindBuffer(gl.ARRAY_BUFFER, glNormalBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, normals, gl.STATIC_DRAW);
-    // Clamped to the range a properly-normalized mesh (max axis extent 1.8) can legitimately
-    // produce, so a degenerate/outlier vertex in a malformed upload can't send the camera
-    // absurdly far away (or absurdly close) — the manual scroll-zoom range covers the rest.
-    modelFitRadius = Math.max(0.3, Math.min(3.5, boundingSphereRadius(flat)));
+
+  // A model is a list of independently-transformable parts instead of one merged triangle soup —
+  // each part is its own GPU buffer pair with its own rest transform and (optionally) its own
+  // animation, so files where several pieces move independently (a common export shape even
+  // without a shared rig — see the multi-part detection this replaced) render and animate
+  // correctly instead of collapsing to one rigid transform applied to everything.
+  let modelParts = [];
+  let modelNormalizeMatrix = IDENTITY4; // shared recenter+scale, applied once outside every part's own transform
+  let modelAnimDuration = 1; // shared playback timeline every part's animation wraps against
+  let hasAnimation = false;
+
+  function disposeModelParts() {
+    for (const part of modelParts) {
+      if (part.posBuf) gl.deleteBuffer(part.posBuf);
+      if (part.normalBuf) gl.deleteBuffer(part.normalBuf);
+    }
+    modelParts = [];
+  }
+
+  // `parts`: [{ nodeIndex, localTriPos, parentMatrix, localMatrix, anim }] — positions stay in
+  // each part's own local (untransformed) space; parentMatrix/localMatrix/anim describe how to
+  // place it, applied at render time so animated parts can be resampled every frame without
+  // re-uploading geometry. `normalizeMatrix` recenters+scales the whole assembly as one unit.
+  function loadModelParts(parts, normalizeMatrix) {
+    disposeModelParts();
+    modelNormalizeMatrix = normalizeMatrix;
+    let duration = 1;
+    let anyAnim = false;
+    for (const part of parts) {
+      const posBuf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, part.localTriPos, gl.STATIC_DRAW);
+      const normals = computeFlatNormals(part.localTriPos);
+      const normalBuf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, normalBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, normals, gl.STATIC_DRAW);
+      modelParts.push({
+        posBuf, normalBuf,
+        vertCount: part.localTriPos.length / 3,
+        parentMatrix: part.parentMatrix,
+        localMatrix: part.localMatrix,
+        anim: part.anim || null,
+      });
+      if (part.anim) { anyAnim = true; duration = Math.max(duration, part.anim.duration || 1); }
+    }
+    hasAnimation = anyAnim;
+    modelAnimDuration = duration;
+
+    // Fit radius measured on the whole assembly's rest pose, after the shared normalize
+    // transform — same clamping rationale as before: a degenerate/outlier part can't send the
+    // camera absurdly far away or absurdly close, and the manual scroll-zoom range covers the rest.
+    let maxSq = 0;
+    for (let pi = 0; pi < modelParts.length; pi++) {
+      const part = modelParts[pi];
+      const local = parts[pi].localTriPos;
+      const world = m4Multiply(modelNormalizeMatrix, m4Multiply(part.parentMatrix, part.localMatrix));
+      for (let i = 0; i < local.length; i += 3) {
+        const p = m4TransformPoint(world, [local[i], local[i+1], local[i+2]]);
+        const d = p[0]*p[0] + p[1]*p[1] + p[2]*p[2];
+        if (d > maxSq) maxSq = d;
+      }
+    }
+    modelFitRadius = Math.max(0.3, Math.min(3.5, Math.sqrt(maxSq) || 1));
   }
   function parseOBJ(text) {
     const verts = [], tris = [];
@@ -333,16 +371,19 @@ export function initPixelDissolveEngine() {
     for (let i = 0; i < tris.length; i++) {
       raw[i*3] = tris[i][0]; raw[i*3+1] = tris[i][1]; raw[i*3+2] = tris[i][2];
     }
-    // recenter on the mesh's own area-weighted centroid, not the bounding-box center, so it
-    // both appears centered in the viewport and orbits around roughly its center of mass
+    // OBJ has no scene graph — one static, unanimated part. Recenter on the mesh's own
+    // area-weighted centroid, not the bounding-box center, so it both appears centered in the
+    // viewport and orbits around roughly its center of mass; folded into a single shared
+    // normalize matrix (applied at render time) rather than baked directly into the vertex data,
+    // so OBJ and GLB models go through the exact same rendering path.
     const centroid = computeMeshCentroid(raw);
-    const flat = new Float32Array(raw.length);
-    for (let i = 0; i < raw.length; i += 3) {
-      flat[i]   = (raw[i]   - centroid[0]) * scale;
-      flat[i+1] = (raw[i+1] - centroid[1]) * scale;
-      flat[i+2] = (raw[i+2] - centroid[2]) * scale;
-    }
-    return flat;
+    const normalizeMatrix = m4FromTRS(
+      [-centroid[0]*scale, -centroid[1]*scale, -centroid[2]*scale],
+      [0,0,0,1],
+      [scale, scale, scale]
+    );
+    const parts = [{ nodeIndex: -1, localTriPos: raw, parentMatrix: IDENTITY4, localMatrix: IDENTITY4, anim: null }];
+    return { parts, normalizeMatrix };
   }
   document.getElementById('objInput')!.addEventListener('change', (e) => {
     const file = (e.target as HTMLInputElement).files[0];
@@ -350,11 +391,11 @@ export function initPixelDissolveEngine() {
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        const flat = parseOBJ(reader.result as string);
-        uploadMeshToGL(flat);
+        const { parts, normalizeMatrix } = parseOBJ(reader.result as string);
+        loadModelParts(parts, normalizeMatrix);
         usingCustomModel = true;
         modelIsGLB = false;
-        currentAnim = null;
+        animTime = 0;
         animPlaying = false;
         document.getElementById('animHint')!.style.display = 'none';
         setGlbWarning(null);
@@ -367,8 +408,7 @@ export function initPixelDissolveEngine() {
     };
     reader.readAsText(file);
   });
-  // ---- GLB (glTF binary) import: static mesh + simple TRS keyframe animation ----
-  let currentAnim = null;   // { channels:{translation,rotation,scale}, duration, scale }
+  // ---- GLB (glTF binary) import: multi-part mesh + per-part TRS keyframe animation ----
   let animPlaying = false;
   let animTime = 0;
 
@@ -424,15 +464,20 @@ export function initPixelDissolveEngine() {
     if (node.matrix) return new Float32Array(node.matrix);
     return m4FromTRS(node.translation || [0,0,0], node.rotation || [0,0,0,1], node.scale || [1,1,1]);
   }
-  // Walks the full glTF scene graph and merges every mesh primitive it finds into one
-  // triangle soup, each transformed by its own node's world matrix — rather than only ever
-  // reading json.meshes[0].primitives[0]. A Blender/Mixamo export commonly splits a character
-  // into several mesh parts (body, eyes, clothing) as separate nodes, so only taking the first
-  // one silently dropped most of the model. Skinned meshes are placed in their bind pose (this
-  // tool has no vertex-skinning support), using the mesh node's own transform, not the joints'.
-  function collectMeshTriangles(json, bin) {
-    const out = [];
-    if (!json.nodes || !json.nodes.length) return new Float32Array(0);
+  // Walks the full glTF scene graph and collects every mesh-bearing node as its own part —
+  // rather than only ever reading json.meshes[0].primitives[0], or merging everything into one
+  // rigid triangle soup. A Blender export commonly splits a model into several mesh parts (body,
+  // eyes, clothing — or, just as often, several independently-animated basic shapes with no
+  // shared rig at all), so only taking the first one silently dropped most of the model, and
+  // merging them all into one transform couldn't represent parts that move independently.
+  // Positions are kept in each node's own local (untransformed) space; parentMatrix is the world
+  // matrix of everything above it in the hierarchy, and localMatrix is its own rest-pose local
+  // transform — combined at render time so an animated part can be resampled every frame without
+  // touching its geometry. Skinned meshes are placed in their bind pose (this tool has no
+  // vertex-skinning support), using the mesh node's own transform, not the joints'.
+  function collectMeshParts(json, bin) {
+    const parts = [];
+    if (!json.nodes || !json.nodes.length) return parts;
     // Root = a node no other node lists as a child. Computed directly rather than trusting
     // scene.nodes, because treating every node as an independent root (the old fallback when
     // scene.nodes was missing) let a child get visited before its real parent, applying an
@@ -443,7 +488,6 @@ export function initPixelDissolveEngine() {
     const isChild = new Set();
     for (const node of json.nodes) if (node && node.children) for (const c of node.children) isChild.add(c);
     const roots = json.nodes.map((_, i) => i).filter(i => !isChild.has(i));
-    const identity = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
     const visited = new Set();
 
     function visit(nodeIdx, parentMatrix) {
@@ -451,8 +495,10 @@ export function initPixelDissolveEngine() {
       visited.add(nodeIdx);
       const node = json.nodes[nodeIdx];
       if (!node) return;
-      const world = m4Multiply(parentMatrix, glbNodeLocalMatrix(node));
+      const localMatrix = glbNodeLocalMatrix(node);
+      const world = m4Multiply(parentMatrix, localMatrix);
       if (node.mesh !== undefined && json.meshes[node.mesh]) {
+        const localTriPos = [];
         for (const prim of json.meshes[node.mesh].primitives) {
           if (prim.attributes.POSITION === undefined) continue;
           if (prim.mode !== undefined && prim.mode !== 4) continue; // triangle lists only
@@ -468,15 +514,29 @@ export function initPixelDissolveEngine() {
           } else {
             triPos = positions;
           }
-          for (let i = 0; i < triPos.length; i += 3) {
-            const p = m4TransformPoint(world, [triPos[i], triPos[i+1], triPos[i+2]]);
-            out.push(p[0], p[1], p[2]);
-          }
+          for (let i = 0; i < triPos.length; i++) localTriPos.push(triPos[i]);
+        }
+        if (localTriPos.length) {
+          parts.push({ nodeIndex: nodeIdx, localTriPos: new Float32Array(localTriPos), parentMatrix, localMatrix });
         }
       }
       if (node.children) for (const c of node.children) visit(c, world);
     }
-    for (const r of roots) visit(r, identity);
+    for (const r of roots) visit(r, IDENTITY4);
+    return parts;
+  }
+
+  // World-space (rest-pose) positions of every part, for bounds/centroid purposes only — the
+  // actual GPU data stays in local space (see loadModelParts).
+  function partsWorldTriPos(parts) {
+    const out = [];
+    for (const part of parts) {
+      const world = m4Multiply(part.parentMatrix, part.localMatrix);
+      for (let i = 0; i < part.localTriPos.length; i += 3) {
+        const p = m4TransformPoint(world, [part.localTriPos[i], part.localTriPos[i+1], part.localTriPos[i+2]]);
+        out.push(p[0], p[1], p[2]);
+      }
+    }
     return new Float32Array(out);
   }
 
@@ -485,33 +545,39 @@ export function initPixelDissolveEngine() {
     for (let i=0;i<triPos.length;i+=3) for (let k=0;k<3;k++){ min[k]=Math.min(min[k],triPos[i+k]); max[k]=Math.max(max[k],triPos[i+k]); }
     return { min, max, rawSize: Math.max(max[0]-min[0], max[1]-min[1], max[2]-min[2]) };
   }
-  function firstPrimitiveTriangles(json, bin) {
+  function firstPrimitivePart(json, bin) {
     const mesh = json.meshes[0];
     const prim = mesh.primitives && mesh.primitives[0];
     if (!prim || prim.attributes.POSITION === undefined) throw new Error('Mesh has no POSITION attribute');
     const positions = readGLBAccessor(json, bin, prim.attributes.POSITION);
-    if (prim.indices === undefined) return positions;
-    const idxArr = readGLBAccessor(json, bin, prim.indices);
-    const triPos = new Float32Array(idxArr.length * 3);
-    for (let i = 0; i < idxArr.length; i++) {
-      const vi = idxArr[i];
-      triPos[i*3] = positions[vi*3]; triPos[i*3+1] = positions[vi*3+1]; triPos[i*3+2] = positions[vi*3+2];
+    let triPos;
+    if (prim.indices === undefined) {
+      triPos = positions;
+    } else {
+      const idxArr = readGLBAccessor(json, bin, prim.indices);
+      triPos = new Float32Array(idxArr.length * 3);
+      for (let i = 0; i < idxArr.length; i++) {
+        const vi = idxArr[i];
+        triPos[i*3] = positions[vi*3]; triPos[i*3+1] = positions[vi*3+1]; triPos[i*3+2] = positions[vi*3+2];
+      }
     }
-    return triPos;
+    return [{ nodeIndex: -1, localTriPos: triPos, parentMatrix: IDENTITY4, localMatrix: IDENTITY4 }];
   }
 
   function glbToMeshAndAnim(json, bin) {
     if (!json.meshes || !json.meshes.length) throw new Error('No mesh in .glb');
-    let triPos = collectMeshTriangles(json, bin);
-    let b = triPos.length ? boundsOf(triPos) : null;
-    // If the scene-graph merge came back empty, or came back with an absurd/non-finite extent
-    // (a single mis-transformed part dragging the bounding box out to where the real model
-    // shrinks to an invisible speck), fall back to just the first primitive, untransformed —
-    // that's not as complete a picture, but it's guaranteed visible rather than a blank
-    // viewport with no indication of what went wrong.
-    if (!triPos.length || !isFinite(b.rawSize) || b.rawSize < 1e-6) {
-      triPos = firstPrimitiveTriangles(json, bin);
-      b = boundsOf(triPos);
+    let parts = collectMeshParts(json, bin);
+    let worldTriPos = parts.length ? partsWorldTriPos(parts) : new Float32Array(0);
+    let b = worldTriPos.length ? boundsOf(worldTriPos) : null;
+    // If the scene-graph walk came back empty, or came back with an absurd/non-finite extent (a
+    // single mis-transformed part dragging the bounding box out to where the real model shrinks
+    // to an invisible speck), fall back to just the first primitive, untransformed — that's not
+    // as complete a picture, but it's guaranteed visible rather than a blank viewport with no
+    // indication of what went wrong.
+    if (!parts.length || !isFinite(b.rawSize) || b.rawSize < 1e-6) {
+      parts = firstPrimitivePart(json, bin);
+      worldTriPos = partsWorldTriPos(parts);
+      b = boundsOf(worldTriPos);
     }
     const { rawSize } = b;
     const size = rawSize || 1;
@@ -520,7 +586,7 @@ export function initPixelDissolveEngine() {
     // Flag things this tool can't actually do anything with, so the user finds out from a
     // note in the panel rather than by staring at a blank or unchanged viewport.
     const warnings = [];
-    const triCount = triPos.length / 9;
+    const triCount = worldTriPos.length / 9;
     if (triCount === 0 || !isFinite(rawSize) || rawSize < 1e-6) {
       warnings.push('This model has no visible geometry (empty or a single point) — nothing will render.');
     } else if (triCount > 50000) {
@@ -533,45 +599,51 @@ export function initPixelDissolveEngine() {
       warnings.push("This model uses skeletal/bone animation (skinning), which isn't supported — it's shown in its bind pose instead of animating.");
     }
 
-    // recenter on the mesh's own area-weighted centroid, not the bounding-box center, so it
-    // both appears centered in the viewport and orbits around roughly its center of mass
-    const centroid = computeMeshCentroid(triPos);
-    const flat = new Float32Array(triPos.length);
-    for (let i=0;i<triPos.length;i+=3) {
-      flat[i]=(triPos[i]-centroid[0])*normScale;
-      flat[i+1]=(triPos[i+1]-centroid[1])*normScale;
-      flat[i+2]=(triPos[i+2]-centroid[2])*normScale;
-    }
+    // Recenter+scale the whole assembly as one unit, on its overall area-weighted centroid (not
+    // the bounding-box center) — folded into a single shared matrix applied at render time,
+    // rather than baked into each part's own vertex data, so every part moves as one coherent
+    // rigid group while still allowing individual parts to additionally animate on top of it.
+    const centroid = computeMeshCentroid(worldTriPos);
+    const normalizeMatrix = m4FromTRS(
+      [-centroid[0]*normScale, -centroid[1]*normScale, -centroid[2]*normScale],
+      [0,0,0,1],
+      [normScale, normScale, normScale]
+    );
 
-    let anim = null;
-    if (json.animations && json.animations.length) {
-      const a = json.animations[0];
-      // This tool only supports a single rigid transform applied to the whole merged mesh —
-      // there's no per-node animation. A file with more than one clip, or a single clip driving
-      // more than one node, means different parts are meant to move independently (common for a
-      // multi-object mechanical animation exported without a shared rig, e.g. several parts each
-      // with their own Blender action) — applying just one part's transform to the entire merged
-      // assembly doesn't approximate that, it visibly displaces/distorts the whole thing. Safer
-      // to fall back to the static pose and say so than to silently render something wrong.
-      const distinctTargetNodes = new Set(a.channels.map((ch: any) => ch.target.node));
-      if (json.animations.length > 1 || distinctTargetNodes.size > 1) {
-        warnings.push("This model has multiple independently-animated parts, which isn't supported — only a single rigid-body animation is. Showing the static pose instead.");
-      } else {
-        const channels: any = {};
-        let duration = 0;
+    // Per-node animation, built from every clip rather than just the first — a file can (and, for
+    // the basic-shapes case this is meant to support, commonly does) have several parts each
+    // animated by their own clip instead of one shared rig. Every part with a matching node index
+    // gets its own animation; anything else keeps its static rest transform.
+    const nodeAnimByIndex = new Map();
+    if (json.animations) {
+      for (const a of json.animations) {
+        const byNode = new Map();
         for (const ch of a.channels) {
-          const sampler = a.samplers[ch.sampler];
           const path = ch.target.path;
           if (path !== 'translation' && path !== 'rotation' && path !== 'scale') continue;
+          const sampler = a.samplers[ch.sampler];
           const times = readGLBAccessor(json, bin, sampler.input);
           const values = readGLBAccessor(json, bin, sampler.output);
-          channels[path] = { times, values };
-          duration = Math.max(duration, times[times.length-1] || 0);
+          if (!byNode.has(ch.target.node)) byNode.set(ch.target.node, {});
+          byNode.get(ch.target.node)[path] = { times, values };
         }
-        if (Object.keys(channels).length) anim = { channels, duration: duration || 1, scale: normScale };
+        for (const [nodeIdx, channels] of byNode) {
+          let duration = 0;
+          for (const key of Object.keys(channels)) {
+            const times = (channels as any)[key].times;
+            duration = Math.max(duration, times[times.length-1] || 0);
+          }
+          // if more than one clip targets the same node, the last one wins — this tool expects
+          // at most one clip per independently-animated part
+          nodeAnimByIndex.set(nodeIdx, { channels, duration: duration || 1 });
+        }
       }
     }
-    return { flat, anim, warnings };
+    for (const part of parts) {
+      (part as any).anim = part.nodeIndex >= 0 ? nodeAnimByIndex.get(part.nodeIndex) || null : null;
+    }
+
+    return { parts, normalizeMatrix, warnings };
   }
 
   function sampleGLBChannel(channel, t, numComp) {
@@ -602,36 +674,39 @@ export function initPixelDissolveEngine() {
     ]);
   }
 
-  function currentAnimMatrix() {
-    if (!currentAnim) return null;
-    const t = currentAnim.duration > 0 ? animTime % currentAnim.duration : 0;
-    const ch = currentAnim.channels;
+  // Samples one part's own animation channels at time t (wrapped against the shared timeline
+  // every part loops against — see modelAnimDuration) into that part's local TRS matrix. A part
+  // whose own channels end before the shared duration just holds its last keyframe for the
+  // remainder (sampleGLBChannel already clamps at each end), rather than restarting out of sync
+  // with the rest of the model.
+  function sampleAnimMatrix(anim, t) {
+    const ch = anim.channels;
     const trans = ch.translation ? sampleGLBChannel(ch.translation, t, 3) : [0,0,0];
     const rot = ch.rotation ? sampleGLBChannel(ch.rotation, t, 4) : [0,0,0,1];
     const scl = ch.scale ? sampleGLBChannel(ch.scale, t, 3) : [1,1,1];
-    const s = currentAnim.scale;
-    return m4FromTRS([trans[0]*s, trans[1]*s, trans[2]*s], rot, scl);
+    return m4FromTRS(trans, rot, scl);
   }
 
   // glTF/GLB is always authored Y-up by spec, but this tool's camera treats Z as up (see the
   // [0,0,1] up-vector below) — without correcting for that, an unrotated GLB import lies on
-  // its side. Applied as an extra rotation in the model matrix (not baked into the vertex
-  // data at load time) so it also correctly re-orients any TRS animation on the file, which is
-  // authored in that same original Y-up space.
+  // its side. Applied as an extra rotation on top of every part's own model matrix (not baked
+  // into vertex data at load time) so it also correctly re-orients any TRS animation on the
+  // file, which is authored in that same original Y-up space.
   const GLB_AXIS_FIX = m4RotX(Math.PI/2);
 
   // Camera orbits a fixed target instead of the object rotating in place — smoother to
   // navigate, and it means crease-edge projection and the GL render always agree exactly
-  // since both call this same function for their matrices.
+  // since both call this same function for their matrices. Returns camera-only matrices now —
+  // each part supplies its own model matrix at render time (see renderWebGLFrame).
   const CAMERA_FOV = 45 * Math.PI / 180;
   // Margin so an uploaded model doesn't touch the frame edges while orbiting — enough room to
   // rotate freely without clipping, without leaving it looking small/lost in the viewport.
   const FIT_PADDING = 1.35;
-  function computeSceneMatrices() {
+  function computeCameraMatrices() {
     const baseZ = usingCustomModel ? 0 : 0.85;
     const proj = m4Perspective(CAMERA_FOV, glCanvasVis.width/glCanvasVis.height, 0.1, 20);
     const target = [-userPanX*2, -userPanY*2, baseZ];
-    // Uploaded models are recentered on their own centroid at load time (see
+    // Uploaded models are recentered on their own overall centroid at load time (see
     // computeMeshCentroid), so `target` above already sits at that same center for them —
     // meaning modelFitRadius (measured from that same origin) directly gives the distance
     // needed to fit the model in frame, regardless of its shape or original scale. The
@@ -648,11 +723,7 @@ export function initPixelDissolveEngine() {
       target[2] + radius*Math.sin(el)
     ];
     const view = m4LookAt(eye, target, [0,0,1]);
-    const animMat = currentAnimMatrix();
-    let model = animMat || new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
-    if (modelIsGLB) model = m4Multiply(GLB_AXIS_FIX, model);
-    const mvp = m4Multiply(proj, m4Multiply(view, model));
-    return { proj, view, model, mvp, eye, target };
+    return { proj, view, eye, target };
   }
 
   const GLB_SIZE_WARN_BYTES = 20 * 1024 * 1024; // 20MB — a browser-side per-frame renderer, not a game engine
@@ -673,16 +744,15 @@ export function initPixelDissolveEngine() {
     reader.onload = () => {
       try {
         const { json, bin } = parseGLB(reader.result as ArrayBuffer);
-        const { flat, anim, warnings } = glbToMeshAndAnim(json, bin);
-        uploadMeshToGL(flat);
+        const { parts, normalizeMatrix, warnings } = glbToMeshAndAnim(json, bin);
+        loadModelParts(parts, normalizeMatrix);
         usingCustomModel = true;
         modelIsGLB = true;
-        currentAnim = anim;
         animTime = 0;
         animPlaying = false;
         document.getElementById('animPlayBtn')!.textContent = '▶ Play animation';
         document.getElementById('animPlayBtn')!.classList.remove('active');
-        (document.getElementById('animHint') as HTMLElement)!.style.display = anim ? 'block' : 'none';
+        (document.getElementById('animHint') as HTMLElement)!.style.display = hasAnimation ? 'block' : 'none';
         userRotY = 0.626; userRotX = 0.167; userPanX = 0; userPanY = 0; userScale = 1;
         setSource('3d');
         setGlbWarning(fileWarnings.concat(warnings).join(' ') || null);
@@ -767,26 +837,39 @@ export function initPixelDissolveEngine() {
     gl.clearColor(0.024, 0.024, 0.031, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    const { mvp, model, eye } = computeSceneMatrices();
+    const { proj, view, eye } = computeCameraMatrices();
+    const t = hasAnimation && modelAnimDuration > 0 ? animTime % modelAnimDuration : 0;
 
     gl.useProgram(glProgram);
-    gl.bindBuffer(gl.ARRAY_BUFFER, glBuffer);
     const loc = gl.getAttribLocation(glProgram, 'aPos');
-    gl.enableVertexAttribArray(loc);
-    gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
-    gl.bindBuffer(gl.ARRAY_BUFFER, glNormalBuffer);
     const nloc = gl.getAttribLocation(glProgram, 'aNormal');
+    gl.enableVertexAttribArray(loc);
     gl.enableVertexAttribArray(nloc);
-    gl.vertexAttribPointer(nloc, 3, gl.FLOAT, false, 0, 0);
-    gl.uniformMatrix4fv(glUniforms.uMVP, false, mvp);
-    gl.uniformMatrix4fv(glUniforms.uModel, false, model);
     gl.uniform3f(glUniforms.uBaseColor, 0.66, 0.58, 0.82);
     gl.uniform3f(glUniforms.uLightDir, 0.5, -0.6, 0.9);
     gl.uniform3f(glUniforms.uFillDir, -0.45, 0.5, -0.35);
     gl.uniform3f(glUniforms.uEyePos, eye[0], eye[1], eye[2]);
     gl.uniform1f(glUniforms.uLightIntensity, lightIntensity);
     gl.uniform1f(glUniforms.uLightContrast, lightContrast);
-    gl.drawArrays(gl.TRIANGLES, 0, glVertCount);
+
+    // Each part supplies its own local-or-animated transform, composed with its place in the
+    // scene graph and the model's shared recenter/scale — a static part and an animated part
+    // sitting right next to it are drawn with exactly the same pipeline, just a different
+    // localOrAnim matrix, so nothing needs to special-case "does this model have animation".
+    for (const part of modelParts) {
+      const localOrAnim = part.anim ? sampleAnimMatrix(part.anim, t) : part.localMatrix;
+      let model = m4Multiply(modelNormalizeMatrix, m4Multiply(part.parentMatrix, localOrAnim));
+      if (modelIsGLB) model = m4Multiply(GLB_AXIS_FIX, model);
+      const mvp = m4Multiply(proj, m4Multiply(view, model));
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, part.posBuf);
+      gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, part.normalBuf);
+      gl.vertexAttribPointer(nloc, 3, gl.FLOAT, false, 0, 0);
+      gl.uniformMatrix4fv(glUniforms.uMVP, false, mvp);
+      gl.uniformMatrix4fv(glUniforms.uModel, false, model);
+      gl.drawArrays(gl.TRIANGLES, 0, part.vertCount);
+    }
   }
 
   function flowerInsideFlat(u, v) {
@@ -1325,7 +1408,7 @@ export function initPixelDissolveEngine() {
         setFrameSeqStatus(`Rendering frame ${f+1} of ${totalFrames}${etaTxt}`);
 
         if (autoRotate) userRotY += dt * autoRotSpeed;
-        if (animPlaying && currentAnim) animTime += dt;
+        if (animPlaying && hasAnimation) animTime += dt;
 
         renderWebGLFrame('nogrid-lit');
         const sampled = sampleLitGrid(glCanvasVis, cols(), rows());
