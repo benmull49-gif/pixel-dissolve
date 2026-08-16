@@ -24,7 +24,12 @@ let engineBooted = false;
 
 function GroupCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <Card size="sm">
+    // shrink-0 matters here: shadcn's Card has overflow-hidden built in, and a flex item with
+    // non-visible overflow gets an automatic minimum height of 0 — without shrink-0, a sidebar
+    // taller than the viewport doesn't scroll, it squashes every card down to fit and clips
+    // whatever doesn't fit inside each one's own overflow-hidden. shrink-0 forces cards to stay
+    // at their natural height instead, so the sidebar genuinely overflows and scrolls.
+    <Card size="sm" className="shrink-0">
       <CardHeader>
         <CardTitle className="font-mono text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
           {title}
@@ -150,16 +155,19 @@ export default function PixelDissolve() {
             object-contain regardless of their differing internal resolutions (560 vs 700),
             and stretched to fill all the height available below the header. */}
         <div className="grid min-h-[320px] flex-1 grid-cols-1 gap-2 sm:grid-cols-2 lg:min-h-0">
-          <div className="relative min-h-0 overflow-hidden rounded-2xl border border-border bg-[#060608]">
-            <canvas id="glCanvasVis" width={560} height={560} className="h-full w-full object-contain" />
-            <div className="pointer-events-none absolute inset-x-2 top-2 flex items-center justify-between gap-2 rounded-md bg-black/50 px-2 py-1 font-mono text-[9.5px] uppercase tracking-wider text-white/80 backdrop-blur-sm">
+          {/* bg-card (lighter than the page background) plus real padding acts as a visible
+              mat/frame around the near-black canvas — a plain border was too low-contrast
+              against an equally-dark page background to read as a clear edge. */}
+          <div className="relative min-h-0 overflow-hidden rounded-2xl border border-border bg-card p-2 shadow-sm ring-1 ring-foreground/5 dark:ring-foreground/10">
+            <canvas id="glCanvasVis" width={560} height={560} className="h-full w-full rounded-lg bg-[#060608] object-contain" />
+            <div className="pointer-events-none absolute inset-x-4 top-4 flex items-center justify-between gap-2 rounded-md bg-black/50 px-2 py-1 font-mono text-[9.5px] uppercase tracking-wider text-white/80 backdrop-blur-sm">
               <span>3D — drag to orbit, right-drag to pan, scroll to scale</span>
               <span id="orbitHint" className="text-white/70" />
             </div>
           </div>
-          <div className="relative min-h-0 overflow-hidden rounded-2xl border border-border bg-[#060608]">
-            <canvas id="cv" width={700} height={700} className="h-full w-full object-contain" />
-            <div className="pointer-events-none absolute inset-x-2 top-2 rounded-md bg-black/50 px-2 py-1 font-mono text-[9.5px] uppercase tracking-wider text-white/80 backdrop-blur-sm">
+          <div className="relative min-h-0 overflow-hidden rounded-2xl border border-border bg-card p-2 shadow-sm ring-1 ring-foreground/5 dark:ring-foreground/10">
+            <canvas id="cv" width={700} height={700} className="h-full w-full rounded-lg bg-[#060608] object-contain" />
+            <div className="pointer-events-none absolute inset-x-4 top-4 rounded-md bg-black/50 px-2 py-1 font-mono text-[9.5px] uppercase tracking-wider text-white/80 backdrop-blur-sm">
               2D — live pixel-dissolve output
             </div>
           </div>
