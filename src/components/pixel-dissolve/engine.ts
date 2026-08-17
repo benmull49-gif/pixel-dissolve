@@ -303,13 +303,16 @@ export function initPixelDissolveEngine() {
     let duration = 1;
     let anyAnim = false;
     for (const part of parts) {
+      const hasMorph = !!(part.morphTargets && part.morphTargets.length && part.morphAnim);
       const posBuf = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
-      gl.bufferData(gl.ARRAY_BUFFER, part.localTriPos, gl.STATIC_DRAW);
+      // DYNAMIC_DRAW for morph-animated parts: their position buffer gets rewritten every frame
+      // (see renderWebGLFrame) rather than uploaded once, unlike a purely rigid-transform part.
+      gl.bufferData(gl.ARRAY_BUFFER, part.localTriPos, hasMorph ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
       const normals = computeFlatNormals(part.localTriPos);
       const normalBuf = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, normalBuf);
-      gl.bufferData(gl.ARRAY_BUFFER, normals, gl.STATIC_DRAW);
+      gl.bufferData(gl.ARRAY_BUFFER, normals, hasMorph ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
       modelParts.push({
         posBuf, normalBuf,
         vertCount: part.localTriPos.length / 3,
@@ -318,15 +321,27 @@ export function initPixelDissolveEngine() {
         normalizedParent: m4Multiply(normalizeMatrix, part.parentMatrix),
         localMatrix: part.localMatrix,
         anim: part.anim || null,
+        // Morph target (shape key) animation: deforms vertex positions directly every frame,
+        // independent of (and composable with) the rigid transform above. basePositions is kept
+        // as the CPU-side rest shape to blend from; blendScratch is reused every frame instead of
+        // allocating a fresh Float32Array 60 times a second.
+        morphTargets: hasMorph ? part.morphTargets : null,
+        morphAnim: hasMorph ? part.morphAnim : null,
+        basePositions: hasMorph ? part.localTriPos : null,
+        blendScratch: hasMorph ? new Float32Array(part.localTriPos.length) : null,
       });
       if (part.anim) { anyAnim = true; duration = Math.max(duration, part.anim.duration || 1); }
+      if (hasMorph) { anyAnim = true; duration = Math.max(duration, part.morphAnim.duration || 1); }
     }
     hasAnimation = anyAnim;
     modelAnimDuration = duration;
 
-    // Fit radius measured on the whole assembly's rest pose, after the shared normalize
-    // transform — same clamping rationale as before: a degenerate/outlier part can't send the
-    // camera absurdly far away or absurdly close, and the manual scroll-zoom range covers the rest.
+    // Fit radius measured across the whole assembly's rest pose AND, for morph-animated parts,
+    // each individual morph target's full-weight extreme — a wave or similar deformation can
+    // bulge well beyond the rest shape, and fitting to rest alone would let the animation clip
+    // outside the frame during playback. Same clamping rationale as before either way: a
+    // degenerate/outlier part can't send the camera absurdly far away or close, and the manual
+    // scroll-zoom range covers the rest.
     let maxSq = 0;
     for (let pi = 0; pi < modelParts.length; pi++) {
       const part = modelParts[pi];
@@ -336,6 +351,15 @@ export function initPixelDissolveEngine() {
         const p = m4TransformPoint(world, [local[i], local[i+1], local[i+2]]);
         const d = p[0]*p[0] + p[1]*p[1] + p[2]*p[2];
         if (d > maxSq) maxSq = d;
+      }
+      if (part.morphTargets) {
+        for (const delta of part.morphTargets) {
+          for (let i = 0; i < local.length; i += 3) {
+            const p = m4TransformPoint(world, [local[i]+delta[i], local[i+1]+delta[i+1], local[i+2]+delta[i+2]]);
+            const d = p[0]*p[0] + p[1]*p[1] + p[2]*p[2];
+            if (d > maxSq) maxSq = d;
+          }
+        }
       }
     }
     modelFitRadius = Math.max(0.3, Math.min(3.5, Math.sqrt(maxSq) || 1));
@@ -427,8 +451,12 @@ export function initPixelDissolveEngine() {
 
   function readGLBAccessor(json, bin, idx) {
     const acc = json.accessors[idx];
-    const bv = json.bufferViews[acc.bufferView];
     const numComp = GLB_TYPE_COMPONENTS[acc.type];
+    // A bufferView is optional per the glTF spec — an accessor with none (and no sparse override,
+    // which this tool doesn't need to handle for the accessors it reads) is implicitly all zeros.
+    // A morph target commonly has one of these: e.g. a target with no actual position delta.
+    if (acc.bufferView === undefined) return new Float32Array(acc.count * numComp);
+    const bv = json.bufferViews[acc.bufferView];
     const compBytes = GLB_COMPONENT_BYTES[acc.componentType];
     const elemSize = numComp * compBytes;
     const stride = bv.byteStride || elemSize;
@@ -492,25 +520,33 @@ export function initPixelDissolveEngine() {
       const world = m4Multiply(parentMatrix, localMatrix);
       if (node.mesh !== undefined && json.meshes[node.mesh]) {
         const localTriPos = [];
+        // morphDeltas[targetIdx] mirrors localTriPos: same length, same per-vertex ordering —
+        // each entry is a POSITION *delta* from the base vertex at that same index (that's the
+        // glTF convention for morph targets), not an absolute position. Populated alongside
+        // localTriPos in the same loop so indexed/expanded ordering can never drift between them.
+        const morphDeltas = [];
         for (const prim of json.meshes[node.mesh].primitives) {
           if (prim.attributes.POSITION === undefined) continue;
           if (prim.mode !== undefined && prim.mode !== 4) continue; // triangle lists only
           const positions = readGLBAccessor(json, bin, prim.attributes.POSITION);
-          let triPos;
-          if (prim.indices !== undefined) {
-            const idxArr = readGLBAccessor(json, bin, prim.indices);
-            triPos = new Float32Array(idxArr.length * 3);
-            for (let i = 0; i < idxArr.length; i++) {
-              const vi = idxArr[i];
-              triPos[i*3] = positions[vi*3]; triPos[i*3+1] = positions[vi*3+1]; triPos[i*3+2] = positions[vi*3+2];
+          const primTargets = prim.targets || [];
+          const targetPositions = primTargets.map((t) => t.POSITION !== undefined ? readGLBAccessor(json, bin, t.POSITION) : null);
+          const idxArr = prim.indices !== undefined ? readGLBAccessor(json, bin, prim.indices) : null;
+          const vertCount = idxArr ? idxArr.length : positions.length / 3;
+          for (let i = 0; i < vertCount; i++) {
+            const vi = idxArr ? idxArr[i] : i;
+            localTriPos.push(positions[vi*3], positions[vi*3+1], positions[vi*3+2]);
+            for (let t = 0; t < targetPositions.length; t++) {
+              if (!morphDeltas[t]) morphDeltas[t] = [];
+              const tp = targetPositions[t];
+              if (tp) morphDeltas[t].push(tp[vi*3], tp[vi*3+1], tp[vi*3+2]);
+              else morphDeltas[t].push(0, 0, 0);
             }
-          } else {
-            triPos = positions;
           }
-          for (let i = 0; i < triPos.length; i++) localTriPos.push(triPos[i]);
         }
         if (localTriPos.length) {
-          parts.push({ nodeIndex: nodeIdx, localTriPos: new Float32Array(localTriPos), parentMatrix, localMatrix });
+          const morphTargets = morphDeltas.length ? morphDeltas.map((d) => new Float32Array(d)) : null;
+          parts.push({ nodeIndex: nodeIdx, localTriPos: new Float32Array(localTriPos), parentMatrix, localMatrix, morphTargets });
         }
       }
       if (node.children) for (const c of node.children) visit(c, world);
@@ -606,15 +642,27 @@ export function initPixelDissolveEngine() {
     // Per-node animation, built from every clip rather than just the first — a file can (and, for
     // the basic-shapes case this is meant to support, commonly does) have several parts each
     // animated by their own clip instead of one shared rig. Every part with a matching node index
-    // gets its own animation; anything else keeps its static rest transform.
+    // gets its own animation; anything else keeps its static rest transform. "weights" channels
+    // (morph target / shape key animation) are collected separately from translation/rotation/
+    // scale — they animate vertex positions directly rather than a node's transform, and have a
+    // different shape (one weight per morph target per keyframe, not a fixed 3/4-component vector).
     const nodeAnimByIndex = new Map();
+    const nodeMorphAnimByIndex = new Map();
     if (json.animations) {
       for (const a of json.animations) {
         const byNode = new Map();
         for (const ch of a.channels) {
           const path = ch.target.path;
-          if (path !== 'translation' && path !== 'rotation' && path !== 'scale') continue;
           const sampler = a.samplers[ch.sampler];
+          if (path === 'weights') {
+            const times = readGLBAccessor(json, bin, sampler.input);
+            const values = readGLBAccessor(json, bin, sampler.output);
+            const numTargets = times.length > 0 ? values.length / times.length : 0;
+            const duration = times[times.length-1] || 0;
+            nodeMorphAnimByIndex.set(ch.target.node, { times, values, numTargets, duration: duration || 1 });
+            continue;
+          }
+          if (path !== 'translation' && path !== 'rotation' && path !== 'scale') continue;
           const times = readGLBAccessor(json, bin, sampler.input);
           const values = readGLBAccessor(json, bin, sampler.output);
           if (!byNode.has(ch.target.node)) byNode.set(ch.target.node, {});
@@ -633,7 +681,11 @@ export function initPixelDissolveEngine() {
       }
     }
     for (const part of parts) {
+      const node = part.nodeIndex >= 0 ? json.nodes[part.nodeIndex] : null;
       (part as any).anim = part.nodeIndex >= 0 ? nodeAnimByIndex.get(part.nodeIndex) || null : null;
+      (part as any).morphAnim = part.nodeIndex >= 0 ? nodeMorphAnimByIndex.get(part.nodeIndex) || null : null;
+      const mesh = node && node.mesh !== undefined ? json.meshes[node.mesh] : null;
+      (part as any).restWeights = (node && node.weights) || (mesh && mesh.weights) || null;
     }
 
     return { parts, normalizeMatrix, warnings };
@@ -844,6 +896,28 @@ export function initPixelDissolveEngine() {
       let model = m4Multiply(part.normalizedParent, localOrAnim);
       if (modelIsGLB) model = m4Multiply(GLB_AXIS_FIX, model);
       const mvp = m4Multiply(proj, m4Multiply(view, model));
+
+      // Morph target (shape key) animation deforms this part's actual vertex positions — re-blend
+      // and re-upload them every frame, on top of (independent of) whatever rigid transform is
+      // also being applied above. Only targets with a non-negligible weight are summed: the
+      // triangular keyframing a per-frame shape-key bake uses means at most ~2 targets are ever
+      // active at once, so this stays cheap regardless of how many total targets the part has.
+      if (part.morphTargets && part.morphAnim) {
+        const weights = sampleGLBChannel(part.morphAnim, t, part.morphAnim.numTargets);
+        const blended = part.blendScratch;
+        blended.set(part.basePositions);
+        for (let k = 0; k < weights.length; k++) {
+          const w = weights[k];
+          if (w < 0.0005 && w > -0.0005) continue;
+          const delta = part.morphTargets[k];
+          if (!delta) continue;
+          for (let i = 0; i < blended.length; i++) blended[i] += delta[i] * w;
+        }
+        gl.bindBuffer(gl.ARRAY_BUFFER, part.posBuf);
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, blended);
+        gl.bindBuffer(gl.ARRAY_BUFFER, part.normalBuf);
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, computeFlatNormals(blended));
+      }
 
       gl.bindBuffer(gl.ARRAY_BUFFER, part.posBuf);
       gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
